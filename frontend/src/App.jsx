@@ -61,12 +61,12 @@ function App() {
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
 
-    fetch(`${BASE_URL}/expenses/`)
+    fetch(`${BASE_URL}/expense/`)
       .then((response) => response.json())
       .then((data) => setExpenses(data))
       .catch((err) => console.error(err));
 
-    fetch(`${BASE_URL}/budgets/`)
+    fetch(`${BASE_URL}/budget/`)
       .then((response) => response.json())
       .then((data) => setBudgets(data))
       .catch((err) => console.error(err));
@@ -77,61 +77,81 @@ function App() {
     return match ? match.name : "Uncategorized";
   }
 
-  function handleAddCategory() {
-    fetch(`${BASE_URL}/categories/`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name: newCategoryName }),
-    })
-      .then((response) => response.json())
-      .then((created) => {
-        setCategories([...categories, created]);
-        setNewCategoryName("");
-      })
-      .catch((err) => console.error(err));
+function handleAddCategory() {
+  if (newCategoryName.trim() === "") {
+    return;
   }
 
-  function handleAddExpense() {
-    fetch(`${BASE_URL}/expenses/`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        amount: Number(expAmount),
-        date: expDate,
-        description: expDescription,
-        category_id: expCategoryId ? Number(expCategoryId) : null,
-      }),
+  fetch(`${BASE_URL}/categories/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: newCategoryName }),
+  })
+    .then((response) => response.json())
+    .then((created) => {
+      setCategories([...categories, created]);
+      setNewCategoryName("");
     })
-      .then((response) => response.json())
-      .then((created) => {
-        setExpenses([...expenses, created]);
-        setExpAmount("");
-        setExpDate("");
-        setExpDescription("");
-        setExpCategoryId("");
-      })
-      .catch((err) => console.error(err));
+    .catch((err) => console.error(err));
+}
+
+function handleAddExpense() {
+  if (
+    expAmount === "" ||
+    expDate === "" ||
+    expDescription.trim() === ""
+  ) {
+    return;
   }
 
-  function handleAddBudget() {
-    fetch(`${BASE_URL}/budgets/`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        category_id: Number(budCategoryId),
-        year: Number(budYear),
-        month: Number(budMonth),
-        amount: Number(budAmount),
-      }),
+  fetch(`${BASE_URL}/expense/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      amount: Number(expAmount),
+      date: expDate,
+      description: expDescription,
+      category_id: expCategoryId ? Number(expCategoryId) : null,
+    }),
+  })
+    .then((response) => response.json())
+    .then((created) => {
+      setExpenses([...expenses, created]);
+      setExpAmount("");
+      setExpDate("");
+      setExpDescription("");
+      setExpCategoryId("");
     })
-      .then((response) => response.json())
-      .then((created) => {
-        setBudgets([...budgets, created]);
-        setBudAmount("");
-      })
-      .catch((err) => console.error(err));
+    .catch((err) => console.error(err));
+}
+
+function handleAddBudget() {
+  if (
+    budCategoryId === "" ||
+    budAmount === "" ||
+    budYear === "" ||
+    budMonth === ""
+  ) {
+    return;
   }
 
+  fetch(`${BASE_URL}/budget/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      category_id: Number(budCategoryId),
+      year: Number(budYear),
+      month: Number(budMonth),
+      amount: Number(budAmount),
+    }),
+  })
+    .then((response) => response.json())
+    .then((created) => {
+      setBudgets([...budgets, created]);
+      setBudAmount("");
+    })
+    .catch((err) => console.error(err));
+}
   function handleGetMonthly() {
     fetch(`${BASE_URL}/summary/${sumYear}/${sumMonth}`)
       .then((response) => response.json())

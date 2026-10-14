@@ -2,13 +2,14 @@ from fastapi import APIRouter, HTTPException
 from sqlmodel import select
 
 from database import SessionDep
-from models import Category
+from models import Category, CategoryCreate
 
 router = APIRouter()
 
 
 @router.post("/categories/")
-def create_category(category: Category, session: SessionDep) -> Category:
+def create_category(category_in: CategoryCreate, session: SessionDep) -> Category:
+    category = Category(**category_in.model_dump())
     session.add(category)
     session.commit()
     session.refresh(category)
@@ -28,3 +29,11 @@ def delete_category(category_id: int, session: SessionDep):
     session.delete(category)
     session.commit()
     return {"ok": True}
+
+@router.post("/categories/")
+def create_category(category_in: CategoryCreate, session: SessionDep) -> Category:
+    category = Category(**category_in.model_dump())
+    session.add(category)
+    session.commit()
+    session.refresh(category)
+    return category

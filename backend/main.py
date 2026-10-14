@@ -12,7 +12,6 @@ async def lifespan(app: FastAPI):
     create_db_and_tables()
     yield
 
-
 app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(

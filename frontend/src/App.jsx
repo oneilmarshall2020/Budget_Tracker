@@ -8,12 +8,14 @@ import {
   Pencil,
   Trash2,
   TriangleAlert,
+  Undo2,
   Upload,
   X,
 } from "lucide-react";
 
 const BASE_URL = "http://127.0.0.1:8000";
 
+// ================================================================ styles
 // Reused class strings, pulled out so the markup below stays readable.
 const card = "rounded-2xl border border-slate-200 bg-white p-6 shadow-sm";
 const heading = "text-lg font-semibold text-slate-900";
@@ -94,6 +96,14 @@ function formatCompact(n) {
 function formatDate(isoDate, withYear = false) {
   const [y, m, d] = isoDate.split("-").map(Number);
   return `${MONTHS_SHORT[m - 1]} ${d}${withYear ? `, ${y}` : ""}`;
+}
+
+// "2026-10-15T21:36:32+00:00" -> "Oct 15" in your local time. Older setups may send the
+// time without a zone; it's UTC either way, so add the "Z" that says so.
+function formatDay(isoDateTime) {
+  const hasZone = /(Z|[+-]\d\d:\d\d)$/i.test(isoDateTime);
+  const when = new Date(hasZone ? isoDateTime : `${isoDateTime}Z`);
+  return when.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
 function plural(count, word) {
@@ -393,6 +403,7 @@ function FlagBadge({ flag }) {
   );
 }
 
+// ================================================================ the app
 function App() {
   // --- Which month you're looking at ---
   const [year, setYear] = useState(CURRENT_YEAR);
@@ -413,7 +424,7 @@ function App() {
   const [busy, setBusy] = useState(false); // a save/delete is in flight
   const [actionError, setActionError] = useState(null);
   const [notice, setNotice] = useState(null);
-  const [confirmBox, setConfirmBox] = useState(null); // { message, onConfirm }
+  const [confirmBox, setConfirmBox] = useState(null); // { message, onConfirm, actionLabel }
 
   // --- Add forms ---
   const [newAccount, setNewAccount] = useState(EMPTY_ACCOUNT);
@@ -435,7 +446,9 @@ function App() {
   const [importFile, setImportFile] = useState(null);
   const [importPassword, setImportPassword] = useState("");
   const [fileInputKey, setFileInputKey] = useState(0); // changing a key resets the <input type="file">
-  const [preview, setPreview] = useState(null); // { account_id, rows, problems }
+  const [preview, setPreview] = useState(null); // { account_id, file_name, rows, problems }
+  const [imports, setImports] = useState([]); // past statement imports, newest first
+  const [showAllImports, setShowAllImports] = useState(false);
 
   // --- Year report view ---
   const [yearView, setYearView] = useState("chart");
@@ -452,8 +465,9 @@ function App() {
       api(`/budget/?${period}`),
       api(`/summary/${year}/${month}`),
       api(`/summary/${year}`),
+      api("/statement/imports"),
     ])
-      .then(([accountList, categoryList, txList, budgetList, monthSummary, yearSummary]) => {
+      .then(([accountList, categoryList, txList, budgetList, monthSummary, yearSummary, importList]) => {
         if (ignore) return;
         setAccounts(accountList);
         setCategories(categoryList);
@@ -461,6 +475,7 @@ function App() {
         setBudgets(budgetList);
         setMonthly(monthSummary);
         setYearly(yearSummary);
+        setImports(importList);
         setLoadError(null);
         // Keep the chosen import account if it still exists, else pick the first one.
         setImportAccountId((current) =>
@@ -506,8 +521,8 @@ function App() {
     }
   }
 
-  function askConfirm(message, onConfirm) {
-    setConfirmBox({ message, onConfirm });
+  function askConfirm(message, onConfirm, actionLabel = "Delete") {
+    setConfirmBox({ message, onConfirm, actionLabel });
   }
 
   function goToMonth(delta) {
@@ -516,7 +531,7 @@ function App() {
     setMonth(next.month);
   }
 
-  // --- Lookups ---
+  // --- lookups ---
   function categoryName(id) {
     return categories.find((c) => c.id === id)?.name ?? "Uncategorized";
   }
@@ -527,7 +542,7 @@ function App() {
     return categories.filter((c) => categoryFits(c, type));
   }
 
-  // --- Accounts ---
+  // ---------------------------------------------------------------- accounts
   function handleAddAccount() {
     run(async () => {
       await api("/account/", { method: "POST", body: newAccount });
@@ -747,7 +762,7 @@ function App() {
     run(async () => {
       const result = await api("/statement/confirm", {
         method: "POST",
-        body: { account_id: preview.account_id, rows },
+        body: { account_id: preview.account_id, file_name: preview.file_name, rows },
       });
 
       // Jump to the month most of these transactions belong to.
@@ -772,6 +787,21 @@ function App() {
       setFileInputKey((k) => k + 1);
       reload();
     });
+  }
+
+  // Wrong statement? Remove everything that import added, in one go.
+  function handleUndoImport(batch) {
+    const count = plural(batch.remaining, "transaction");
+    askConfirm(
+      `Remove the ${count} imported from "${batch.file_name}" (${formatDate(batch.first_date)} – ${formatDate(batch.last_date, true)})? ` +
+        "Any changes you made to them go too. Transactions you logged yourself aren't touched.",
+      async () => {
+        const result = await api(`/statement/imports/${batch.id}`, { method: "DELETE" });
+        setNotice(`Removed ${plural(result.deleted, "transaction")} from ${batch.file_name}`);
+        reload();
+      },
+      "Undo import"
+    );
   }
 
   // ---------------------------------------------------------------- numbers for the page
@@ -1213,6 +1243,45 @@ function App() {
                       </details>
                     </div>
                   )}
+
+                  {imports.length > 0 && (
+                    <div className="mt-5 border-t border-slate-100 pt-4">
+                      <h3 className="mb-2 text-sm font-semibold text-slate-900">Recent imports</h3>
+                      <ul className="divide-y divide-slate-100">
+                        {(showAllImports ? imports : imports.slice(0, 3)).map((batch) => (
+                          <li key={batch.id} className="flex items-center justify-between gap-2 py-2">
+                            <div className="min-w-0">
+                              <p className="truncate text-sm text-slate-700" title={batch.file_name}>
+                                {batch.file_name}
+                              </p>
+                              <p className="text-xs text-slate-400">
+                                {accountName(batch.account_id)} · {formatDate(batch.first_date)} –{" "}
+                                {formatDate(batch.last_date)} ·{" "}
+                                {batch.remaining === batch.row_count
+                                  ? plural(batch.row_count, "row")
+                                  : `${batch.remaining} of ${batch.row_count} rows left`}{" "}
+                                · added {formatDay(batch.imported_at)}
+                              </p>
+                            </div>
+                            <button
+                              className={`${iconBtn} flex shrink-0 items-center gap-1 text-xs font-medium hover:text-rose-600`}
+                              onClick={() => handleUndoImport(batch)}
+                              aria-label={`Undo import of ${batch.file_name}`}
+                            >
+                              <Undo2 className="h-4 w-4" /> Undo
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                      {imports.length > 3 && (
+                        <button
+                          className="mt-1 text-xs font-medium text-slate-500 hover:text-slate-800"
+                          onClick={() => setShowAllImports(!showAllImports)}>
+                          {showAllImports ? "Show fewer" : `Show all ${imports.length}`}
+                        </button>
+                      )}
+                    </div>
+                  )}
                 </section>
 
                 <section className={card}>
@@ -1230,8 +1299,7 @@ function App() {
                             <EditButtons
                               name={`${categoryName(budget.category_id)} budget`}
                               onEdit={() => setEditBudget({ ...budget, amount: String(budget.amount) })}
-                              onDelete={() => handleDeleteBudget(budget)}
-                            />
+                              onDelete={() => handleDeleteBudget(budget)}/>
                           </div>
                         </li>
                       ))}
@@ -1252,8 +1320,7 @@ function App() {
                         className={`${input} col-span-2`}
                         value={newBudget.category_id}
                         onChange={(event) => setNewBudget({ ...newBudget, category_id: event.target.value })}
-                        aria-label="Budget category"
-                      >
+                        aria-label="Budget category">
                         <option value="">Choose category</option>
                         {unbudgetedCategories.map((c) => (
                           <option key={c.id} value={c.id}>
@@ -1268,8 +1335,7 @@ function App() {
                         step="0.01"
                         placeholder="Amount"
                         value={newBudget.amount}
-                        onChange={(event) => setNewBudget({ ...newBudget, amount: event.target.value })}
-                      />
+                        onChange={(event) => setNewBudget({ ...newBudget, amount: event.target.value })}/>
                       <button className={primaryBtn} onClick={handleAddBudget} disabled={busy}>
                         Add budget
                       </button>
@@ -1302,8 +1368,7 @@ function App() {
                         <EditButtons
                           name={a.nickname}
                           onEdit={() => setEditAccount({ ...a })}
-                          onDelete={() => handleDeleteAccount(a)}
-                        />
+                          onDelete={() => handleDeleteAccount(a)}/>
                       </li>
                     ))}
                   </ul>
@@ -1313,20 +1378,17 @@ function App() {
                     className={`${input} col-span-2`}
                     placeholder="Nickname (e.g. NCB Savings)"
                     value={newAccount.nickname}
-                    onChange={(event) => setNewAccount({ ...newAccount, nickname: event.target.value })}
-                  />
+                    onChange={(event) => setNewAccount({ ...newAccount, nickname: event.target.value })}/>
                   <input
                     className={input}
                     placeholder="Bank"
                     value={newAccount.bank_name}
-                    onChange={(event) => setNewAccount({ ...newAccount, bank_name: event.target.value })}
-                  />
+                    onChange={(event) => setNewAccount({ ...newAccount, bank_name: event.target.value })}/>
                   <select
                     className={input}
                     value={newAccount.account_type}
                     onChange={(event) => setNewAccount({ ...newAccount, account_type: event.target.value })}
-                    aria-label="Account type"
-                  >
+                    aria-label="Account type">
                     {Object.entries(ACCOUNT_TYPE_LABELS).map(([value, text]) => (
                       <option key={value} value={value}>
                         {text}
@@ -1340,8 +1402,7 @@ function App() {
                     value={newAccount.last_four}
                     onChange={(event) =>
                       setNewAccount({ ...newAccount, last_four: event.target.value.replace(/\D/g, "").slice(0, 4) })
-                    }
-                  />
+                    }/>
                   <button className={primaryBtn} onClick={handleAddAccount} disabled={busy}>
                     Add account
                   </button>
@@ -1372,8 +1433,7 @@ function App() {
                                 <EditButtons
                                   name={c.name}
                                   onEdit={() => setEditCategory({ ...c })}
-                                  onDelete={() => handleDeleteCategory(c)}
-                                />
+                                  onDelete={() => handleDeleteCategory(c)}/>
                               </li>
                             ))}
                           </ul>
@@ -1387,14 +1447,12 @@ function App() {
                     className={input}
                     placeholder="New category name"
                     value={newCategory.name}
-                    onChange={(event) => setNewCategory({ ...newCategory, name: event.target.value })}
-                  />
+                    onChange={(event) => setNewCategory({ ...newCategory, name: event.target.value })}/>
                   <select
                     className={input}
                     value={newCategory.kind}
                     onChange={(event) => setNewCategory({ ...newCategory, kind: event.target.value })}
-                    aria-label="Category kind"
-                  >
+                    aria-label="Category kind">
                     <option value="expense">Spending</option>
                     <option value="income">Income</option>
                   </select>
@@ -1417,8 +1475,7 @@ function App() {
                     <button
                       key={view}
                       className={`rounded-md px-3 py-1 capitalize ${yearView === view ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-50"}`}
-                      onClick={() => setYearView(view)}
-                    >
+                      onClick={() => setYearView(view)}>
                       {view}
                     </button>
                   ))}
@@ -1432,8 +1489,7 @@ function App() {
                 <StatTile
                   label="Savings rate"
                   value={yearly.savings_rate === null ? "—" : `${yearly.savings_rate}%`}
-                  note={yearly.savings_rate === null ? "No income recorded yet" : "of income kept"}
-                />
+                  note={yearly.savings_rate === null ? "No income recorded yet" : "of income kept"}/>
               </div>
 
               <div className="mt-6">
@@ -1560,12 +1616,11 @@ function App() {
                 Import {plural(includedRows.length, "transaction")}
               </button>
             </>
-          }
-        >
+          }>
           {preview.problems.length > 0 && (
             <div className="mb-4 rounded-lg bg-amber-50 px-4 py-3 text-sm text-amber-900">
               <p className="flex items-center gap-1.5 font-medium">
-                <TriangleAlert className="h-4 w-4" /> Some numbers didn't add up. Check these against the PDF:
+                <TriangleAlert className="h-4 w-4" /> Check these before importing:
               </p>
               <ul className="mt-1 list-inside list-disc">
                 {preview.problems.map((problem) => (
@@ -1617,8 +1672,7 @@ function App() {
                           checked={row.include}
                           disabled={row.flag === "duplicate"}
                           onChange={(event) => updatePreviewRow(row.key, { include: event.target.checked })}
-                          aria-label={`Import ${row.description}`}
-                        />
+                          aria-label={`Import ${row.description}`}/>
                       </td>
                       <td className="py-2 align-top whitespace-nowrap text-slate-500">{formatDate(row.date)}</td>
                       <td className="py-2 pr-3 align-top">
@@ -1638,8 +1692,7 @@ function App() {
                               category_id: categoryFits(current, type) ? row.category_id : null,
                             });
                           }}
-                          aria-label="Type"
-                        >
+                          aria-label="Type">
                           {Object.entries(TYPE_LABELS).map(([value, text]) => (
                             <option key={value} value={value}>
                               {text}
@@ -1653,8 +1706,7 @@ function App() {
                           value={row.type === "transfer" ? "" : (row.category_id ?? "")}
                           disabled={row.type === "transfer"}
                           onChange={(event) => updatePreviewRow(row.key, { category_id: toId(event.target.value) })}
-                          aria-label="Category"
-                        >
+                          aria-label="Category">
                           <option value="">{row.type === "transfer" ? "—" : "Uncategorized"}</option>
                           {categoriesFor(row.type).map((c) => (
                             <option key={c.id} value={c.id}>
@@ -1666,8 +1718,7 @@ function App() {
                       <td
                         className={`py-2 text-right align-top font-medium whitespace-nowrap tabular-nums ${
                           row.type === "transfer" ? "text-slate-500" : moneyIn ? "text-emerald-700" : "text-slate-900"
-                        }`}
-                      >
+                        }`}>
                         {row.type === "transfer" ? "" : moneyIn ? "+" : "−"}
                         {formatMoney(row.amount)}
                       </td>
@@ -1685,14 +1736,12 @@ function App() {
               className={`${smallInputBox} w-44`}
               placeholder="Name"
               value={newCategory.name}
-              onChange={(event) => setNewCategory({ ...newCategory, name: event.target.value })}
-            />
+              onChange={(event) => setNewCategory({ ...newCategory, name: event.target.value })}/>
             <select
               className={`${smallInputBox} w-28`}
               value={newCategory.kind}
               onChange={(event) => setNewCategory({ ...newCategory, kind: event.target.value })}
-              aria-label="Category kind"
-            >
+              aria-label="Category kind">
               <option value="expense">Spending</option>
               <option value="income">Income</option>
             </select>
@@ -1718,15 +1767,13 @@ function App() {
                 Save
               </button>
             </>
-          }
-        >
+          }>
           <div className="grid grid-cols-2 gap-3">
             <Field label="Type">
               <select
                 className={input}
                 value={editTx.type}
-                onChange={(event) => setEditTx(withType(editTx, event.target.value))}
-              >
+                onChange={(event) => setEditTx(withType(editTx, event.target.value))}>
                 {Object.entries(TYPE_LABELS).map(([value, text]) => (
                   <option key={value} value={value}>
                     {text}
@@ -1741,30 +1788,26 @@ function App() {
                 min="0"
                 step="0.01"
                 value={editTx.amount}
-                onChange={(event) => setEditTx({ ...editTx, amount: event.target.value })}
-              />
+                onChange={(event) => setEditTx({ ...editTx, amount: event.target.value })}/>
             </Field>
             <Field label="Description" className="col-span-2">
               <input
                 className={input}
                 value={editTx.description}
-                onChange={(event) => setEditTx({ ...editTx, description: event.target.value })}
-              />
+                onChange={(event) => setEditTx({ ...editTx, description: event.target.value })}/>
             </Field>
             <Field label="Date">
               <input
                 className={input}
                 type="date"
                 value={editTx.date}
-                onChange={(event) => setEditTx({ ...editTx, date: event.target.value })}
-              />
+                onChange={(event) => setEditTx({ ...editTx, date: event.target.value })}/>
             </Field>
             <Field label="Account">
               <select
                 className={input}
                 value={editTx.account_id}
-                onChange={(event) => setEditTx({ ...editTx, account_id: event.target.value })}
-              >
+                onChange={(event) => setEditTx({ ...editTx, account_id: event.target.value })}>
                 <option value="">Cash / no account</option>
                 {accounts.map((a) => (
                   <option key={a.id} value={a.id}>
@@ -1778,8 +1821,7 @@ function App() {
                 className={input}
                 value={editTx.type === "transfer" ? "" : editTx.category_id}
                 disabled={editTx.type === "transfer"}
-                onChange={(event) => setEditTx({ ...editTx, category_id: event.target.value })}
-              >
+                onChange={(event) => setEditTx({ ...editTx, category_id: event.target.value })}>
                 <option value="">{editTx.type === "transfer" ? "No category for transfers" : "Uncategorized"}</option>
                 {categoriesFor(editTx.type).map((c) => (
                   <option key={c.id} value={c.id}>
@@ -1806,29 +1848,25 @@ function App() {
                 Save
               </button>
             </>
-          }
-        >
+          }>
           <div className="grid grid-cols-2 gap-3">
             <Field label="Nickname" className="col-span-2">
               <input
                 className={input}
                 value={editAccount.nickname}
-                onChange={(event) => setEditAccount({ ...editAccount, nickname: event.target.value })}
-              />
+                onChange={(event) => setEditAccount({ ...editAccount, nickname: event.target.value })}/>
             </Field>
             <Field label="Bank">
               <input
                 className={input}
                 value={editAccount.bank_name}
-                onChange={(event) => setEditAccount({ ...editAccount, bank_name: event.target.value })}
-              />
+                onChange={(event) => setEditAccount({ ...editAccount, bank_name: event.target.value })}/>
             </Field>
             <Field label="Type">
               <select
                 className={input}
                 value={editAccount.account_type}
-                onChange={(event) => setEditAccount({ ...editAccount, account_type: event.target.value })}
-              >
+                onChange={(event) => setEditAccount({ ...editAccount, account_type: event.target.value })}>
                 {Object.entries(ACCOUNT_TYPE_LABELS).map(([value, text]) => (
                   <option key={value} value={value}>
                     {text}
@@ -1843,8 +1881,7 @@ function App() {
                 value={editAccount.last_four}
                 onChange={(event) =>
                   setEditAccount({ ...editAccount, last_four: event.target.value.replace(/\D/g, "").slice(0, 4) })
-                }
-              />
+                }/>
             </Field>
           </div>
         </Modal>
@@ -1864,22 +1901,19 @@ function App() {
                 Save
               </button>
             </>
-          }
-        >
+          }>
           <div className="grid grid-cols-2 gap-3">
             <Field label="Name" className="col-span-2">
               <input
                 className={input}
                 value={editCategory.name}
-                onChange={(event) => setEditCategory({ ...editCategory, name: event.target.value })}
-              />
+                onChange={(event) => setEditCategory({ ...editCategory, name: event.target.value })}/>
             </Field>
             <Field label="Kind" className="col-span-2">
               <select
                 className={input}
                 value={editCategory.kind}
-                onChange={(event) => setEditCategory({ ...editCategory, kind: event.target.value })}
-              >
+                onChange={(event) => setEditCategory({ ...editCategory, kind: event.target.value })}>
                 <option value="expense">Spending</option>
                 <option value="income">Income</option>
               </select>
@@ -1903,8 +1937,7 @@ function App() {
                 Save
               </button>
             </>
-          }
-        >
+          }>
           <Field label="Amount">
             <input
               className={input}
@@ -1912,8 +1945,7 @@ function App() {
               min="0"
               step="0.01"
               value={editBudget.amount}
-              onChange={(event) => setEditBudget({ ...editBudget, amount: event.target.value })}
-            />
+              onChange={(event) => setEditBudget({ ...editBudget, amount: event.target.value })}/>
           </Field>
         </Modal>
       )}
@@ -1936,13 +1968,11 @@ function App() {
                     await confirmBox.onConfirm();
                     setConfirmBox(null);
                   })
-                }
-              >
-                Delete
+                }>
+                {confirmBox.actionLabel}
               </button>
             </>
-          }
-        >
+          }>
           <p className="text-sm text-slate-600">{confirmBox.message}</p>
         </Modal>
       )}
@@ -1953,8 +1983,7 @@ function App() {
           {actionError && (
             <div
               role="alert"
-              className="pointer-events-auto flex max-w-lg items-start gap-2 rounded-xl bg-rose-600 px-4 py-3 text-sm text-white shadow-lg"
-            >
+              className="pointer-events-auto flex max-w-lg items-start gap-2 rounded-xl bg-rose-600 px-4 py-3 text-sm text-white shadow-lg">
               <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
               <span>{actionError}</span>
               <button className="ml-2 opacity-80 hover:opacity-100" onClick={() => setActionError(null)} aria-label="Dismiss">
@@ -1965,8 +1994,7 @@ function App() {
           {notice && (
             <div
               role="status"
-              className="pointer-events-auto flex max-w-lg items-start gap-2 rounded-xl bg-slate-900 px-4 py-3 text-sm text-white shadow-lg"
-            >
+              className="pointer-events-auto flex max-w-lg items-start gap-2 rounded-xl bg-slate-900 px-4 py-3 text-sm text-white shadow-lg">
               <CircleCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />
               <span>{notice}</span>
               <button className="ml-2 opacity-80 hover:opacity-100" onClick={() => setNotice(null)} aria-label="Dismiss">

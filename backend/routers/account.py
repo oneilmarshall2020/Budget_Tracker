@@ -3,7 +3,7 @@ from sqlmodel import select
 
 from database import SessionDep
 from helpers import get_account_or_404
-from models import Account, AccountCreate, AccountUpdate, Transaction
+from models import Account, AccountCreate, AccountUpdate, StatementImport, Transaction
 
 router = APIRouter(tags=["Accounts"])
 
@@ -38,10 +38,19 @@ def update_account(
 def delete_account(account_id: int, session: SessionDep):
     account = get_account_or_404(session, account_id)
 
+    # The money was still earned or spent, so keep the transactions and unlink them.
     linked = session.exec(select(Transaction).where(Transaction.account_id == account_id)).all()
     for transaction in linked:
         transaction.account_id = None
         session.add(transaction)
+
+    # Same for the import history (it can still be undone afterwards).
+    imports = session.exec(
+        select(StatementImport).where(StatementImport.account_id == account_id)
+    ).all()
+    for batch in imports:
+        batch.account_id = None
+        session.add(batch)
 
     session.flush()
     session.delete(account)

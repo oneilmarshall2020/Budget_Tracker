@@ -31,7 +31,7 @@ def to_float(text: str) -> float:
     return float(text.replace(",", "").strip())
 
 
-# === CSV ===
+# ================================================================ CSV
 # Columns: date,description,amount   (optional: type, category)
 #   date      YYYY-MM-DD
 #   amount    negative = money out, positive = money in (same as the bank)
@@ -70,18 +70,23 @@ def parse_csv(file_bytes: bytes):
     return rows, problems
 
 
-# === NCB PDF ===
+# ================================================================ NCB PDF
 NCB_LINE = re.compile(
     r"^(\d{1,2}/[A-Za-z]{3})\s+(.+?)\s+(-?[\d,]+\.\d{2})\s+(-?[\d,]+\.\d{2})$"
 )  # date, particulars, amount, balance
-# The "BALANCE BROUGHT FORWARD" label is in a tiny font, so the PDF often splits it onto
-# its own line and leaves "14/Sep 16,040.86" behind. A date followed by a single amount
-# is never a transaction (those have two), so either form counts as brought forward.
+# The "BALANCE BROUGHT FORWARD" label is in a tiny font and often doesn't come out as text,
+# and on page 1 even the date can be missing. So all of these count as brought forward:
+#   "14/Sep BALANCE BROUGHT FORWARD 16,040.86"   "14/Sep 16,040.86"   "/ 16,831.83"
+# A transaction line always has TWO amounts (amount + balance), so it never matches this.
 NCB_BROUGHT_FORWARD = re.compile(
-    r"^\d{1,2}/[A-Za-z]{3}\s+(?:BALANCE\s*BROUGHT\s*FORWARD\s+)?(-?[\d,]+\.\d{2})$",
+    r"^(?:\d{0,2}\s*/\s*(?:[A-Za-z]{3})?\s+(?:BALANCE\s*BROUGHT\s*FORWARD\s+)?"
+    r"|BALANCE\s*BROUGHT\s*FORWARD\s+)(-?[\d,]+\.\d{2})$",
     re.IGNORECASE,
 )
-NCB_STATEMENT_DATE = re.compile(r"STATEMENT\s*DATE\s*:?\s*(\d{2})-(\d{2})-(\d{4})", re.IGNORECASE)
+# Any full date like 30-09-2026 (dd-mm-yyyy)
+FULL_DATE = re.compile(r"\b(\d{2})-(\d{2})-(\d{4})\b")
+# A run of digits (spaces or dashes allowed inside) that isn't part of an amount like 1,120.00
+LONG_NUMBER = re.compile(r"(?<![\d,.])\d[\d -]{4,}\d(?![\d,.])")
 NCB_FOOTER = re.compile(r"^(\d+)\s+([\d,]+\.\d{2})\s+(\d+)\s+([\d,]+(?:\.\d{2})?)(?:\s|$)")
 
 MONTHS = {
@@ -93,16 +98,57 @@ MONTHS = {
 }
 
 
-def resolve_date(day_month: str, stmt_month: int, stmt_year: int) -> datetime.date:
-    """'14/Sep' + statement month/year -> a real date.
+def find_reference_date(pages: list[str], today: datetime.date | None = None) -> datetime.date | None:
+    """A date from the statement that is on or after every transaction in it.
 
-    A row whose month is later than the statement's month belongs to the previous
+    Rows only say "14/Sep", so we need this to know the year. NCB's header labels
+    ("STATEMENT DATE:", "DATE OPENED:") aren't real text in the PDF, only their values
+    are, so we can't search for the label. Instead: take the LATEST dd-mm-yyyy date in
+    the file. That's the statement date (or the printed-on date at the end), and both
+    come after every transaction. The date the account was opened is older, so it loses.
+    Dates in the future (e.g. "offer valid until ...") are ignored.
+    """
+    today = today or datetime.date.today()
+    found = []
+    for text in pages:
+        for day, month, year in FULL_DATE.findall(text):
+            try:
+                found.append(datetime.date(int(year), int(month), int(day)))
+            except ValueError:
+                continue  # looks like a date but isn't one (e.g. 31-02-2026)
+    found = [d for d in found if d <= today]
+    return max(found) if found else None
+
+
+def account_number_endings(pages: list[str]) -> set[str]:
+    """Last 4 digits of anything that looks like an account number in the page-1 header.
+
+    Only looks above the first transaction (rows like "Digicel Ding*125761897" have long
+    numbers too). Dates are removed first so 27-04-2018 isn't mistaken for a number.
+    Nothing here is stored: it's only compared with the account you picked.
+    """
+    endings = set()
+    for raw_line in (pages[0] if pages else "").splitlines():
+        line = raw_line.strip()
+        if NCB_LINE.match(line) or NCB_BROUGHT_FORWARD.match(line):
+            break  # the header is over
+        for match in LONG_NUMBER.finditer(FULL_DATE.sub(" ", line)):
+            digits = re.sub(r"\D", "", match.group())
+            if 6 <= len(digits) <= 20:
+                endings.add(digits[-4:])
+    return endings
+
+
+def resolve_date(day_month: str, ref_month: int, ref_year: int) -> datetime.date:
+    """'14/Sep' + the reference month/year -> a real date.
+
+    A row whose month is later than the reference month belongs to the previous
     year (a January statement holding late-December rows). We look the month up
     ourselves because strptime without a year assumes 1900, which has no 29 Feb.
     """
     day_str, month_str = day_month.split("/")
     month = MONTHS[month_str.title()]
-    year = stmt_year if month <= stmt_month else stmt_year - 1
+    year = ref_year if month <= ref_month else ref_year - 1
     return datetime.date(year, month, int(day_str))
 
 
@@ -120,15 +166,39 @@ def open_pdf(file_bytes: bytes, password: str | None):
         raise ValueError("Couldn't read this PDF")
 
 
-def parse_ncb_pdf(file_bytes: bytes, password: str | None = None):
-    rows, problems = [], []
+def parse_ncb_pdf(file_bytes: bytes, password: str | None = None, last_four: str | None = None):
     with open_pdf(file_bytes, password) as pdf:
         pages = [page.extract_text() or "" for page in pdf.pages]
+    return parse_ncb_text(pages, last_four=last_four)
 
-    match = next((NCB_STATEMENT_DATE.search(text) for text in pages if NCB_STATEMENT_DATE.search(text)), None)
-    if not match:
-        raise ValueError("Couldn't find the STATEMENT DATE. Is this an NCB statement?")
-    stmt_month, stmt_year = int(match.group(2)), int(match.group(3))
+
+def parse_ncb_text(
+    pages: list[str], today: datetime.date | None = None, last_four: str | None = None
+):
+    """The actual NCB parsing, on text already pulled out of the PDF (one string per page).
+
+    Kept separate from the PDF reading so it can be tested with plain text.
+    last_four: the picked account's last 4 digits, to catch "wrong statement" mistakes.
+    """
+    rows, problems = [], []
+
+    if last_four:
+        endings = account_number_endings(pages)
+        if endings and last_four not in endings:
+            problems.append(
+                f"This statement looks like it's for an account ending in "
+                f"{' or '.join(sorted(endings))}, but you picked the account ending in "
+                f"{last_four}. Is this the right statement?"
+            )
+
+    reference = find_reference_date(pages, today)
+    if reference is None:
+        reference = today or datetime.date.today()
+        problems.append(
+            "Couldn't find the statement date, so the year of each row was guessed from "
+            "today's date. Check the dates before importing."
+        )
+    ref_month, ref_year = reference.month, reference.year
 
     previous_page_close = None
     for page_no, text in enumerate(pages, start=1):
@@ -170,7 +240,7 @@ def parse_ncb_pdf(file_bytes: bytes, password: str | None = None):
                     credits += 1
                     credit_total += amount
                 rows.append(
-                    ParsedRow(resolve_date(day_month, stmt_month, stmt_year), particulars, amount)
+                    ParsedRow(resolve_date(day_month, ref_month, ref_year), particulars, amount)
                 )
                 continue
 
@@ -198,7 +268,7 @@ def parse_ncb_pdf(file_bytes: bytes, password: str | None = None):
     return rows, problems
 
 
-# === Dispatch ===
+# ================================================================ dispatch
 PDF_PARSERS = {"NCB": parse_ncb_pdf}
 
 
@@ -209,18 +279,24 @@ def bank_key(bank_name: str) -> str:
     return upper.strip()
 
 
-def parse_statement(file_bytes: bytes, filename: str, bank_name: str, password: str | None = None):
+def parse_statement(
+    file_bytes: bytes,
+    filename: str,
+    bank_name: str,
+    password: str | None = None,
+    last_four: str | None = None,
+):
     if b"%PDF" in file_bytes[:1024]:  # every PDF starts with %PDF, whatever its name
         parser = PDF_PARSERS.get(bank_key(bank_name))
         if parser is None:
             raise ValueError(f"There's no PDF reader for {bank_name} yet. Use a CSV for this account.")
-        return parser(file_bytes, password)
+        return parser(file_bytes, password, last_four)
     if filename.lower().endswith(".csv"):
         return parse_csv(file_bytes)
     raise ValueError("Upload a .csv or .pdf file")
 
 
-# --- Classification ---
+# ================================================================ classification
 FEE_MARKERS = ("POS TX FEE", "GCT ON POS TX FEE")
 BANK_FEES = "Bank Fees"
 
@@ -232,11 +308,11 @@ def classify(description: str, amount: float) -> tuple[TransactionType, str | No
 
     if any(marker in upper for marker in FEE_MARKERS):
         return (TransactionType.expense if money_out else TransactionType.refund), BANK_FEES, None
-    if upper.startswith("POSREV"):  
+    if upper.startswith("POSREV"):  # a reversed card purchase (and its fees) coming back
         return (TransactionType.refund if not money_out else TransactionType.expense), None, None
 
     direction = TransactionType.expense if money_out else TransactionType.income
-    if "ELINK" in upper or "TRF-" in upper:  
+    if "ELINK" in upper or "TRF-" in upper:  # a payment to someone, or your own account?
         return direction, None, "review"
     return direction, None, None
 

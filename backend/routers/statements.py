@@ -2,12 +2,19 @@ from datetime import timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from sqlmodel import select
 
 from database import SessionDep
 from helpers import category_fits, get_account_or_404, resolve_category
-from models import Category, CategoryKind, ImportConfirm, Transaction, TransactionSource
+from models import (
+    Category,
+    CategoryKind,
+    ImportConfirm,
+    StatementImport,
+    Transaction,
+    TransactionSource,
+)
 from parsers import BANK_FEES, classify, clean_description, merchant_key, parse_statement
 
 router = APIRouter(tags=["Statement import"])
@@ -26,11 +33,11 @@ def preview_statement(
     file: Annotated[UploadFile, File()],
     password: Annotated[str | None, Form()] = None,
 ):
-    """Read a statement and return rows for review."""
+    """Read a statement and return rows for review. Nothing is saved here."""
     account = get_account_or_404(session, account_id)
     try:
         parsed, problems = parse_statement(
-            file.file.read(), file.filename or "", account.bank_name, password
+            file.file.read(), file.filename or "", account.bank_name, password, account.last_four
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -77,6 +84,7 @@ def preview_statement(
         description = clean_description(row.description)
         amount = round(abs(row.amount), 2)
 
+        # Category: CSV column, then rule, then what you used for this merchant before.
         category_id = None
         name = row.category_name or suggested
         if name and name.lower() in by_name:
@@ -88,6 +96,8 @@ def preview_statement(
 
         include, note = True, None
 
+        # Already imported? Same account, date, amount and description. (Not type:
+        # you may have changed it in an earlier review, e.g. income -> transfer.)
         duplicate = next(
             (
                 t for t in existing
@@ -135,7 +145,12 @@ def preview_statement(
             "include": include,
         })
 
-    return {"account_id": account_id, "rows": rows, "problems": problems}
+    return {
+        "account_id": account_id,
+        "file_name": file.filename or "statement",
+        "rows": rows,
+        "problems": problems,
+    }
 
 
 @router.post("/statement/confirm")
@@ -157,6 +172,17 @@ def confirm_import(payload: ImportConfirm, session: SessionDep):
         )
     ).all()
     used = set()
+
+    # The batch: every row saved below points to it, so the whole import can be undone.
+    batch = StatementImport(
+        account_id=payload.account_id,
+        file_name=payload.file_name.strip() or "statement",
+        first_date=low,
+        last_date=high,
+        row_count=0,
+    )
+    session.add(batch)
+    session.flush()  # gives the batch its id now, before the transactions need it
 
     created, skipped = [], 0
     for row in payload.rows:
@@ -184,11 +210,54 @@ def confirm_import(payload: ImportConfirm, session: SessionDep):
             source=TransactionSource.statement,
             category_id=category_id,
             account_id=payload.account_id,
+            import_id=batch.id,
         )
         session.add(transaction)
         created.append(transaction)
 
+    if not created:
+        session.delete(batch)  # everything was already there: nothing to undo later
+        batch = None
+    else:
+        batch.row_count = len(created)
+        session.add(batch)
+
     session.commit()
     for transaction in created:
         session.refresh(transaction)
-    return {"created": created, "skipped": skipped}
+    return {"created": created, "skipped": skipped, "import_id": batch.id if batch else None}
+
+
+@router.get("/statement/imports")
+def list_imports(session: SessionDep):
+    """Your statement imports, newest first, with how many of their rows still exist."""
+    remaining = dict(
+        session.exec(
+            select(Transaction.import_id, func.count(Transaction.id))
+            .where(Transaction.import_id.is_not(None))
+            .group_by(Transaction.import_id)
+        ).all()
+    )
+    batches = session.exec(
+        select(StatementImport).order_by(StatementImport.imported_at.desc(), StatementImport.id.desc())
+    ).all()
+    return [{**batch.model_dump(), "remaining": remaining.get(batch.id, 0)} for batch in batches]
+
+
+@router.delete("/statement/imports/{import_id}")
+def undo_import(import_id: int, session: SessionDep):
+    """Remove every transaction an import created, then the import itself.
+
+    Transactions you typed in yourself are never touched: they have no import_id.
+    """
+    batch = session.get(StatementImport, import_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Import not found")
+
+    rows = session.exec(select(Transaction).where(Transaction.import_id == import_id)).all()
+    for transaction in rows:
+        session.delete(transaction)
+    session.flush()  # children first, then the parent (foreign keys are on)
+    session.delete(batch)
+    session.commit()
+    return {"deleted": len(rows)}

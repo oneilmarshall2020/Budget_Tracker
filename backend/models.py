@@ -5,7 +5,7 @@ from pydantic import field_validator
 from sqlmodel import Field, SQLModel
 
 
-# --- Helper Functions ---
+# ---------------------------------------------------------------- helpers
 def clean_text(value: str | None, label: str) -> str | None:
     """Strip whitespace and reject blanks. None passes through (partial updates)."""
     if value is None:
@@ -14,6 +14,7 @@ def clean_text(value: str | None, label: str) -> str | None:
     if not cleaned:
         raise ValueError(f"{label} cannot be blank")
     return cleaned
+
 
 def clean_last_four(value: str | None) -> str | None:
     if value is None:
@@ -24,20 +25,23 @@ def clean_last_four(value: str | None) -> str | None:
     return cleaned
 
 
-# --- Enums ---
+# ---------------------------------------------------------------- enums
 class TransactionType(str, Enum):
     income = "income"
     expense = "expense"
     transfer = "transfer"
     refund = "refund"
 
+
 class TransactionSource(str, Enum):
-    manual = "manual"       
-    statement = "statement"  
+    manual = "manual"        
+    statement = "statement"  # imported from a bank statement
+
 
 class CategoryKind(str, Enum):
     income = "income"
     expense = "expense"
+
 
 class AccountType(str, Enum):
     savings = "savings"
@@ -45,7 +49,7 @@ class AccountType(str, Enum):
     credit_card = "credit_card"
 
 
-# --- Accounts ---
+# ---------------------------------------------------------------- accounts
 class Account(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     nickname: str
@@ -53,6 +57,7 @@ class Account(SQLModel, table=True):
     account_type: AccountType
     last_four: str
     currency: str = "JMD"
+
 
 class AccountCreate(SQLModel):
     nickname: str
@@ -75,6 +80,7 @@ class AccountCreate(SQLModel):
     @classmethod
     def check_last_four(cls, value):
         return clean_last_four(value)
+
 
 class AccountUpdate(SQLModel):
     nickname: str | None = None
@@ -99,11 +105,12 @@ class AccountUpdate(SQLModel):
         return clean_last_four(value)
 
 
-# --- Categories ---
+# ---------------------------------------------------------------- categories
 class Category(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     name: str
     kind: CategoryKind = CategoryKind.expense
+
 
 class CategoryCreate(SQLModel):
     name: str
@@ -113,6 +120,7 @@ class CategoryCreate(SQLModel):
     @classmethod
     def check_name(cls, value):
         return clean_text(value, "Category name")
+
 
 class CategoryUpdate(SQLModel):
     name: str | None = None
@@ -124,7 +132,7 @@ class CategoryUpdate(SQLModel):
         return clean_text(value, "Category name")
 
 
-# --- Budgets ---
+# ---------------------------------------------------------------- budgets
 class Budget(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     category_id: int = Field(foreign_key="category.id")
@@ -132,11 +140,13 @@ class Budget(SQLModel, table=True):
     month: int
     amount: float
 
+
 class BudgetCreate(SQLModel):
     category_id: int
     year: int = Field(ge=2000, le=2100)
     month: int = Field(ge=1, le=12)
     amount: float = Field(gt=0)
+
 
 class BudgetUpdate(SQLModel):
     category_id: int | None = None
@@ -145,18 +155,40 @@ class BudgetUpdate(SQLModel):
     amount: float | None = Field(default=None, gt=0)
 
 
-# --- Transactions ---
+# ---------------------------------------------------------------- statement imports
+class StatementImport(SQLModel, table=True):
+    """One confirmed statement import (a batch), so the whole thing can be undone."""
+
+    __tablename__ = "statement_import"
+
+    id: int | None = Field(default=None, primary_key=True)
+    account_id: int | None = Field(default=None, foreign_key="account.id")
+    file_name: str
+    # Stored in UTC (the universal clock); the browser shows it in local time.
+    imported_at: datetime.datetime = Field(
+        default_factory=lambda: datetime.datetime.now(datetime.timezone.utc)
+    )
+    first_date: datetime.date
+    last_date: datetime.date
+    row_count: int
+
+
+# ---------------------------------------------------------------- transactions
 class Transaction(SQLModel, table=True):
+    # "transaction" is a reserved word in SQL, so the table gets a safer name.
     __tablename__ = "transactions"
 
     id: int | None = Field(default=None, primary_key=True)
-    amount: float  
+    amount: float  # always positive; `type` says which way the money moved
     date: datetime.date
     description: str
     type: TransactionType
     source: TransactionSource = TransactionSource.manual
     category_id: int | None = Field(default=None, foreign_key="category.id")
     account_id: int | None = Field(default=None, foreign_key="account.id")
+    # Which statement import created this row (None = you typed it in).
+    import_id: int | None = Field(default=None, foreign_key="statement_import.id")
+
 
 class TransactionCreate(SQLModel):
     amount: float = Field(gt=0)
@@ -170,6 +202,7 @@ class TransactionCreate(SQLModel):
     @classmethod
     def check_description(cls, value):
         return clean_text(value, "Description")
+
 
 class TransactionUpdate(SQLModel):
     amount: float | None = Field(default=None, gt=0)
@@ -185,8 +218,10 @@ class TransactionUpdate(SQLModel):
         return clean_text(value, "Description")
 
 
-# --- Statement Import ---
+# ---------------------------------------------------------------- statement import
 class ImportRow(SQLModel):
+    """One reviewed row from the import preview, sent back to be saved."""
+
     date: datetime.date
     description: str
     amount: float = Field(gt=0)
@@ -201,4 +236,5 @@ class ImportRow(SQLModel):
 
 class ImportConfirm(SQLModel):
     account_id: int
+    file_name: str = "statement"
     rows: list[ImportRow]

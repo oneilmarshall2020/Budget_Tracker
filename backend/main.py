@@ -4,13 +4,14 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from database import create_db_and_tables
-from routers import categories, expense, budget, summaries
+from routers import account, budget, categories, statements, summaries, transaction
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     create_db_and_tables()
     yield
+
 
 app = FastAPI(lifespan=lifespan)
 
@@ -22,9 +23,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(account.router)
 app.include_router(categories.router)
-app.include_router(expense.router)
 app.include_router(budget.router)
+app.include_router(transaction.router)
+app.include_router(statements.router)
 app.include_router(summaries.router)
 
 

@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException
 from sqlmodel import select
 
 from database import SessionDep
-from models import Budget, Category, CategoryCreate, CategoryUpdate, Transaction
+from models import Budget, Category, CategoryCreate, CategoryRule, CategoryUpdate, Transaction
 
 router = APIRouter(tags=["Categories"])
 
@@ -30,7 +30,8 @@ def read_categories(session: SessionDep) -> list[Category]:
 
 @router.patch("/categories/{category_id}")
 def update_category(
-    category_id: int, category_update: CategoryUpdate, session: SessionDep) -> Category:
+    category_id: int, category_update: CategoryUpdate, session: SessionDep
+) -> Category:
     category = get_category_or_404(session, category_id)
     update_data = category_update.model_dump(exclude_unset=True, exclude_none=True)
 
@@ -64,6 +65,12 @@ def delete_category(category_id: int, session: SessionDep):
     for budget in budgets:
         session.delete(budget)
 
+    # Its keywords point nowhere once it's gone: delete them too.
+    rules = session.exec(select(CategoryRule).where(CategoryRule.category_id == category_id)).all()
+    for rule in rules:
+        session.delete(rule)
+
+    # Transactions are your real money history: keep them, just uncategorize them.
     transactions = session.exec(
         select(Transaction).where(Transaction.category_id == category_id)
     ).all()

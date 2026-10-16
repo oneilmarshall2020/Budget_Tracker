@@ -4,7 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from database import create_db_and_tables
-from routers import account, budget, categories, statements, summaries, transaction
+from routers import account, budget, categories, rules, statements, summaries, transaction
 
 
 @asynccontextmanager
@@ -25,6 +25,7 @@ app.add_middleware(
 
 app.include_router(account.router)
 app.include_router(categories.router)
+app.include_router(rules.router)
 app.include_router(budget.router)
 app.include_router(transaction.router)
 app.include_router(statements.router)

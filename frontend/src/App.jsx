@@ -5,7 +5,11 @@ import {
   ChevronRight,
   CircleCheck,
   FileText,
+  Monitor,
+  Moon,
   Pencil,
+  Search,
+  Sun,
   Trash2,
   TriangleAlert,
   Undo2,
@@ -33,17 +37,18 @@ const primaryBtn =
 const secondaryBtn =
   "rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:text-slate-300";
 const dangerBtn =
-  "rounded-lg bg-rose-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-rose-500 disabled:cursor-not-allowed disabled:bg-rose-300";
+  "rounded-lg bg-rose-600 px-4 py-2 text-sm font-medium text-[#fff] transition-colors hover:bg-rose-500 disabled:cursor-not-allowed disabled:bg-rose-300 dark:disabled:bg-rose-900";
 const iconBtn =
   "rounded-md p-1.5 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700";
 
 // Chart colors. Each color always means the same thing everywhere on the page.
 // (Blue + orange is a pair colorblind readers can still tell apart.)
-const INCOME_COLOR = "#2a78d6";
-const SPENDING_COLOR = "#eb6834";
-const SPENDING_TRACK = "#fbe2d7"; // light step of the spending orange, for meter backgrounds
-const OVER_COLOR = "#d03b3b"; // only for "over budget", always shown with an icon + words
-const OVER_TRACK = "#f6d8d8";
+// The actual colors are in index.css, with a light and a dark version of each.
+const INCOME_COLOR = "var(--chart-income)";
+const SPENDING_COLOR = "var(--chart-spending)";
+const SPENDING_TRACK = "var(--chart-spending-track)"; // pale step of the spending color, behind meters
+const OVER_COLOR = "var(--chart-over)"; // only for "over budget", always shown with an icon + words
+const OVER_TRACK = "var(--chart-over-track)";
 const CHART_HEIGHT = 180;
 
 // ================================================================ constants
@@ -106,8 +111,36 @@ function formatDay(isoDateTime) {
   return when.toLocaleDateString("en-US", { month: "short", day: "numeric" });
 }
 
-function plural(count, word) {
-  return `${count} ${word}${count === 1 ? "" : "s"}`;
+// plural(1, "row") -> "1 row", plural(2, "row") -> "2 rows", plural(2, "category", "categories")
+// Browser storage can be blocked (private windows), so never let it crash the app.
+function readSaved(kind, key) {
+  try {
+    return window[kind].getItem(key);
+  } catch {
+    return null;
+  }
+}
+function save(kind, key, value) {
+  try {
+    window[kind].setItem(key, value);
+  } catch {
+    // not saved: fine, it's only a convenience
+  }
+}
+
+// The month you were looking at, remembered until you close the tab.
+function savedPeriod() {
+  try {
+    const { year, month } = JSON.parse(readSaved("sessionStorage", "budget.period"));
+    if (Number.isInteger(year) && month >= 1 && month <= 12) return { year, month };
+  } catch {
+    // nothing saved yet
+  }
+  return { year: CURRENT_YEAR, month: CURRENT_MONTH };
+}
+
+function plural(count, word, many = `${word}s`) {
+  return `${count} ${count === 1 ? word : many}`;
 }
 
 // Move a (year, month) pair by some number of months: (2026, 1) - 1 -> (2025, 12)
@@ -189,7 +222,7 @@ function Modal({ title, subtitle, onClose, wide = false, footer, children }) {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4 dark:bg-black/60"
       onMouseDown={onClose}
     >
       <div
@@ -248,7 +281,7 @@ function EditButtons({ name, onEdit, onDelete }) {
         <Pencil className="h-4 w-4" />
       </button>
       <button
-        className={`${iconBtn} hover:text-rose-600`}
+        className={`${iconBtn} hover:text-rose-600 dark:hover:text-rose-400`}
         onClick={onDelete}
         aria-label={`Delete ${name}`}
       >
@@ -387,10 +420,85 @@ function YearChart({ months, selectedMonth, onPick }) {
   );
 }
 
+// Filters: [id, label, test]. The test decides if a row belongs under that pill.
+const TRANSACTION_FILTERS = [
+  ["all", "All", () => true],
+  ["income", "Income", (tx) => tx.type === "income"],
+  ["expense", "Expenses", (tx) => tx.type === "expense"],
+  ["refund", "Refunds", (tx) => tx.type === "refund"],
+  ["transfer", "Transfers", (tx) => tx.type === "transfer"],
+  ["uncategorized", "Uncategorized", (tx) => tx.type !== "transfer" && tx.category_id === null],
+];
+
+const PREVIEW_FILTERS = [
+  ["all", "All", () => true],
+  ["needs", "Needs category", (row) => row.type !== "transfer" && row.category_id === null],
+  ["categorized", "Categorized", (row) => row.type !== "transfer" && row.category_id !== null],
+  ["review", "Check type", (row) => row.flag === "review"],
+  ["income", "Income", (row) => row.type === "income"],
+  ["expense", "Expenses", (row) => row.type === "expense"],
+  ["transfer", "Transfers", (row) => row.type === "transfer"],
+  ["already", "Already there", (row) => ["duplicate", "possible", "match"].includes(row.flag)],
+];
+
+// A row of clickable pills with counts. Pills with nothing in them are hidden
+// (except "All" and the one you're on).
+function FilterChips({ filters, rows, value, onChange }) {
+  return (
+    <div className="flex flex-wrap gap-1.5" role="group" aria-label="Filter">
+      {filters.map(([id, label, test]) => {
+        const count = rows.filter(test).length;
+        if (count === 0 && id !== "all" && id !== value) return null;
+        const active = id === value;
+        return (
+          <button
+            key={id}
+            type="button"
+            aria-pressed={active}
+            onClick={() => onChange(id)}
+            className={`rounded-full px-3 py-1 text-xs font-medium transition-colors ${
+              active ? "bg-slate-900 text-white" : "bg-slate-100 text-slate-600 hover:bg-slate-200"
+            }`}
+          >
+            {label} <span className={active ? "text-slate-300" : "text-slate-400"}>{count}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function SearchBox({ value, onChange, placeholder }) {
+  return (
+    <div className="relative min-w-0 flex-1">
+      <Search className="pointer-events-none absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2 text-slate-400" />
+      <input
+        className={`${input} pr-8 pl-9`}
+        type="search"
+        placeholder={placeholder}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        aria-label={placeholder}
+      />
+      {value && (
+        <button
+          className="absolute top-1/2 right-2 -translate-y-1/2 rounded p-0.5 text-slate-400 hover:text-slate-700"
+          onClick={() => onChange("")}
+          aria-label="Clear search"
+        >
+          <X className="h-4 w-4" />
+        </button>
+      )}
+    </div>
+  );
+}
+
 const FLAG_STYLES = {
   duplicate: { text: "Already imported", className: "bg-slate-100 text-slate-600" },
-  match: { text: "Already logged", className: "bg-blue-50 text-blue-700" },
-  review: { text: "Check type", className: "bg-amber-50 text-amber-800" },
+  possible: { text: "Probably imported", className: "bg-orange-50 text-orange-800 dark:bg-orange-950/60 dark:text-orange-300" },
+  match: { text: "Already logged", className: "bg-blue-50 text-blue-700 dark:bg-blue-950/60 dark:text-blue-300" },
+  transfer: { text: "Your transfer", className: "bg-violet-50 text-violet-700 dark:bg-violet-950/60 dark:text-violet-300" },
+  review: { text: "Check type", className: "bg-amber-50 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300" },
 };
 
 function FlagBadge({ flag }) {
@@ -406,8 +514,9 @@ function FlagBadge({ flag }) {
 // ================================================================ the app
 function App() {
   // --- Which month you're looking at ---
-  const [year, setYear] = useState(CURRENT_YEAR);
-  const [month, setMonth] = useState(CURRENT_MONTH);
+  const [year, setYear] = useState(() => savedPeriod().year);
+  const [month, setMonth] = useState(() => savedPeriod().month);
+  const [theme, setTheme] = useState(() => readSaved("localStorage", "budget.theme") || "system");
 
   // --- Data from the backend ---
   const [accounts, setAccounts] = useState([]);
@@ -424,7 +533,7 @@ function App() {
   const [busy, setBusy] = useState(false); // a save/delete is in flight
   const [actionError, setActionError] = useState(null);
   const [notice, setNotice] = useState(null);
-  const [confirmBox, setConfirmBox] = useState(null); // { message, onConfirm, actionLabel }
+  const [confirmBox, setConfirmBox] = useState(null); // { message, onConfirm, actionLabel, danger, title }
 
   // --- Add forms ---
   const [newAccount, setNewAccount] = useState(EMPTY_ACCOUNT);
@@ -437,9 +546,17 @@ function App() {
   const [editCategory, setEditCategory] = useState(null);
   const [editBudget, setEditBudget] = useState(null);
   const [editTx, setEditTx] = useState(null);
+  // What the app could learn from a category change in the edit pop-up (null = nothing).
+  const [learnHint, setLearnHint] = useState(null);
 
   // --- Transactions list filter ---
   const [accountFilter, setAccountFilter] = useState("");
+  const [typeFilter, setTypeFilter] = useState("all");
+  const [search, setSearch] = useState("");
+  const [searchScope, setSearchScope] = useState("month"); // "month" | "all"
+  const [allTimeResults, setAllTimeResults] = useState([]);
+  const [previewFilter, setPreviewFilter] = useState("all");
+  const [previewSearch, setPreviewSearch] = useState("");
 
   // --- Statement import ---
   const [importAccountId, setImportAccountId] = useState("");
@@ -448,6 +565,8 @@ function App() {
   const [fileInputKey, setFileInputKey] = useState(0); // changing a key resets the <input type="file">
   const [preview, setPreview] = useState(null); // { account_id, file_name, rows, problems }
   const [imports, setImports] = useState([]); // past statement imports, newest first
+  const [rules, setRules] = useState([]); // keyword -> category rules
+  const [newKeyword, setNewKeyword] = useState("");
   const [showAllImports, setShowAllImports] = useState(false);
 
   // --- Year report view ---
@@ -466,8 +585,9 @@ function App() {
       api(`/summary/${year}/${month}`),
       api(`/summary/${year}`),
       api("/statement/imports"),
+      api("/rules/"),
     ])
-      .then(([accountList, categoryList, txList, budgetList, monthSummary, yearSummary, importList]) => {
+      .then(([accountList, categoryList, txList, budgetList, monthSummary, yearSummary, importList, ruleList]) => {
         if (ignore) return;
         setAccounts(accountList);
         setCategories(categoryList);
@@ -476,6 +596,7 @@ function App() {
         setMonthly(monthSummary);
         setYearly(yearSummary);
         setImports(importList);
+        setRules(ruleList);
         setLoadError(null);
         // Keep the chosen import account if it still exists, else pick the first one.
         setImportAccountId((current) =>
@@ -504,6 +625,46 @@ function App() {
     return () => clearTimeout(timer);
   }, [notice]);
 
+  // "All time" search asks the backend (the page only holds one month).
+  // Waits 300ms after you stop typing so we don't send a request per key.
+  useEffect(() => {
+    const term = search.trim();
+    if (searchScope !== "all" || term.length < 2) return;
+    let ignore = false;
+    const timer = setTimeout(() => {
+      api(`/transaction/?q=${encodeURIComponent(term)}`)
+        .then((rows) => {
+          if (!ignore) setAllTimeResults(rows);
+        })
+        .catch((err) => {
+          if (!ignore) setActionError(err.message);
+        });
+    }, 300);
+    return () => {
+      ignore = true;
+      clearTimeout(timer);
+    };
+  }, [search, searchScope, version]);
+
+  // Remember the month across refreshes (until the tab is closed).
+  useEffect(() => {
+    save("sessionStorage", "budget.period", JSON.stringify({ year, month }));
+  }, [year, month]);
+
+  // Dark mode: put the "dark" class on <html> when chosen, or when "System" and
+  // your computer is in dark mode (and follow it if that changes while open).
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const apply = () => {
+      const dark = theme === "dark" || (theme === "system" && media.matches);
+      document.documentElement.classList.toggle("dark", dark);
+    };
+    apply();
+    save("localStorage", "budget.theme", theme);
+    media.addEventListener("change", apply);
+    return () => media.removeEventListener("change", apply);
+  }, [theme]);
+
   function reload() {
     setVersion((v) => v + 1);
   }
@@ -521,8 +682,9 @@ function App() {
     }
   }
 
-  function askConfirm(message, onConfirm, actionLabel = "Delete") {
-    setConfirmBox({ message, onConfirm, actionLabel });
+  // Opens the "are you sure?" pop-up. Options: button label, red (danger) or not, title.
+  function askConfirm(message, onConfirm, { actionLabel = "Delete", danger = true, title = "Are you sure?" } = {}) {
+    setConfirmBox({ message, onConfirm, actionLabel, danger, title });
   }
 
   function goToMonth(delta) {
@@ -537,6 +699,9 @@ function App() {
   }
   function accountName(id) {
     return accounts.find((a) => a.id === id)?.nickname ?? "No account";
+  }
+  function keywordCount(categoryId) {
+    return rules.filter((r) => r.category_id === categoryId).length;
   }
   function categoriesFor(type) {
     return categories.filter((c) => categoryFits(c, type));
@@ -595,12 +760,40 @@ function App() {
 
   function handleDeleteCategory(category) {
     askConfirm(
-      `Delete "${category.name}"? Its budgets are deleted too. Its transactions are kept and become Uncategorized.`,
+      `Delete "${category.name}"? Its budgets and keywords are deleted too. Its transactions are kept and become Uncategorized.`,
       async () => {
         await api(`/categories/${category.id}`, { method: "DELETE" });
         reload();
       }
     );
+  }
+
+  // ---------------------------------------------------------------- keywords
+  // Keyword changes save right away (unlike name/kind, which wait for Save).
+  function handleAddKeyword() {
+    run(async () => {
+      await api("/rules/", { method: "POST", body: { keyword: newKeyword, category_id: editCategory.id } });
+      setNewKeyword("");
+      reload();
+    });
+  }
+
+  function handleDeleteKeyword(rule) {
+    run(async () => {
+      await api(`/rules/${rule.id}`, { method: "DELETE" });
+      reload();
+    });
+  }
+
+  function handleAddSuggested() {
+    run(async () => {
+      const result = await api("/rules/suggested", { method: "POST" });
+      setNotice(
+        `Added ${plural(result.categories_added, "category", "categories")} and ` +
+          `${plural(result.keywords_added, "keyword")}. Edit any category to see or change its keywords.`
+      );
+      reload();
+    });
   }
 
   // ---------------------------------------------------------------- budgets
@@ -681,23 +874,80 @@ function App() {
     return { ...tx, type, category_id: categoryFits(current, type) ? tx.category_id : "" };
   }
 
+  async function saveNewTransaction(body) {
+    const created = await api("/transaction/", { method: "POST", body });
+    // Keep type and account: you often log several of the same kind in a row.
+    setNewTx({ ...emptyTransaction(), type: newTx.type, account_id: newTx.account_id });
+    const [y, m] = created.date.split("-").map(Number);
+    if (y !== year || m !== month) {
+      setNotice(`Saved. It's dated ${formatDate(created.date, true)}, so it's under ${MONTHS[m - 1]} ${y}.`);
+    }
+    reload();
+  }
+
   function handleAddTransaction() {
     run(async () => {
-      const created = await api("/transaction/", { method: "POST", body: transactionBody(newTx) });
-      // Keep type and account: you often log several of the same kind in a row.
-      setNewTx({ ...emptyTransaction(), type: newTx.type, account_id: newTx.account_id });
-      const [y, m] = created.date.split("-").map(Number);
-      if (y !== year || m !== month) {
-        setNotice(`Saved. It's dated ${formatDate(created.date, true)}, so it's under ${MONTHS[m - 1]} ${y}.`);
+      const body = transactionBody(newTx);
+      // Already in an imported statement? Ask before adding a double.
+      if (body.amount > 0 && body.date) {
+        const params = new URLSearchParams({ amount: body.amount, date: body.date, type: body.type });
+        const similar = await api(`/transaction/similar?${params}`);
+        if (similar.length > 0) {
+          const found = similar[0];
+          askConfirm(
+            `Your ${accountName(found.account_id)} statement already has "${found.description}" for ` +
+              `${formatMoney(found.amount)} on ${formatDate(found.date)}. If that's this purchase, adding it ` +
+              "again would count it twice. Add it anyway?",
+            () => saveNewTransaction(body),
+            { actionLabel: "Add anyway", danger: false, title: "Already imported?" }
+          );
+          return;
+        }
       }
-      reload();
+      await saveNewTransaction(body);
     });
+  }
+
+  // You picked a new category in the edit pop-up: ask the backend what it could learn.
+  function changeEditCategory(value) {
+    setEditTx({ ...editTx, category_id: value });
+    const categoryId = toId(value);
+    if (categoryId === null || categoryId === editTx.original_category_id) {
+      setLearnHint(null);
+      return;
+    }
+    const params = new URLSearchParams({ description: editTx.description, category_id: categoryId, exclude_id: editTx.id });
+    api(`/rules/suggest?${params}`)
+      .then((s) => {
+        const worthAsking = s.keyword && (s.rule_category_id !== categoryId || s.others > 0);
+        setLearnHint(
+          worthAsking ? { ...s, categoryId, remember: s.rule_category_id !== categoryId, applyOthers: false } : null
+        );
+      })
+      .catch(() => setLearnHint(null)); // learning is optional: never block an edit
   }
 
   function handleSaveTransaction() {
     run(async () => {
       await api(`/transaction/${editTx.id}`, { method: "PATCH", body: transactionBody(editTx) });
+      // Only use the hint if it's for the category you ended up saving.
+      const hint =
+        learnHint && learnHint.categoryId === toId(editTx.category_id) && editTx.type !== "transfer" ? learnHint : null;
+      const learned = [];
+      if (hint?.remember && hint.rule_category_id !== hint.categoryId) {
+        await api("/rules/remember", { method: "POST", body: { keyword: hint.keyword, category_id: hint.categoryId } });
+        learned.push(`${hint.keyword} → ${categoryName(hint.categoryId)} from now on`);
+      }
+      if (hint?.applyOthers && hint.others > 0) {
+        const result = await api("/rules/apply", {
+          method: "POST",
+          body: { keyword: hint.keyword, category_id: hint.categoryId, exclude_id: editTx.id },
+        });
+        learned.push(`changed ${plural(result.updated, "other transaction")}`);
+      }
+      if (learned.length > 0) setNotice(`Saved. ${learned.join("; ")}.`);
       setEditTx(null);
+      setLearnHint(null);
       reload();
     });
   }
@@ -710,11 +960,13 @@ function App() {
   }
 
   function openEditTransaction(tx) {
+    setLearnHint(null);
     setEditTx({
       ...tx,
       amount: String(tx.amount),
       account_id: tx.account_id ?? "",
       category_id: tx.category_id ?? "",
+      original_category_id: tx.category_id, // to tell whether you changed it
     });
   }
 
@@ -729,6 +981,8 @@ function App() {
       if (importPassword) form.append("password", importPassword);
       const data = await api("/statement/preview", { method: "POST", form });
       setPreview(data);
+      setPreviewFilter("all");
+      setPreviewSearch("");
       setImportPassword(""); // don't keep the PDF password around longer than needed
       reload(); // the preview may have created the "Bank Fees" category
     });
@@ -741,10 +995,32 @@ function App() {
     }));
   }
 
-  function setAllIncluded(include) {
+  // You picked a category for one row: rows from the same place (same keyword) that
+  // you haven't set yourself get it too, if it fits their type.
+  function setPreviewCategory(changed, categoryId) {
+    const category = categories.find((c) => c.id === categoryId);
     setPreview((current) => ({
       ...current,
-      rows: current.rows.map((row) => (row.flag === "duplicate" ? row : { ...row, include })),
+      rows: current.rows.map((row) => {
+        if (row.key === changed.key) {
+          return { ...row, category_id: categoryId, category_source: null, touched: true };
+        }
+        const samePlace = changed.keyword && row.keyword === changed.keyword;
+        if (samePlace && !row.touched && categoryId !== null && categoryFits(category, row.type)) {
+          return { ...row, category_id: categoryId, category_source: "same" };
+        }
+        return row;
+      }),
+    }));
+  }
+
+  // Select all / none: only the rows you can see with the current filter and search.
+  function setAllIncluded(include, visibleKeys) {
+    setPreview((current) => ({
+      ...current,
+      rows: current.rows.map((row) =>
+        row.flag === "duplicate" || !visibleKeys.has(row.key) ? row : { ...row, include }
+      ),
     }));
   }
 
@@ -762,7 +1038,17 @@ function App() {
     run(async () => {
       const result = await api("/statement/confirm", {
         method: "POST",
-        body: { account_id: preview.account_id, file_name: preview.file_name, rows },
+        body: {
+          account_id: preview.account_id,
+          file_name: preview.file_name,
+          rows,
+          // Rows left unticked because you logged them yourself: link your entries to this account.
+          matched_ids: preview.rows.filter((r) => r.flag === "match" && !r.include).map((r) => r.match_id),
+          // Transfers between your accounts: the other side becomes a transfer too.
+          transfer_pair_ids: preview.rows
+            .filter((r) => r.include && r.pair_id && r.type === "transfer")
+            .map((r) => r.pair_id),
+        },
       });
 
       // Jump to the month most of these transactions belong to.
@@ -775,6 +1061,15 @@ function App() {
 
       let message = `Imported ${plural(result.created.length, "transaction")}`;
       if (result.skipped) message += ` (${result.skipped} already there, skipped)`;
+      if (result.keywords_learned.length > 0) {
+        message += `. Learned ${plural(result.keywords_learned.length, "keyword")}: ${result.keywords_learned.join(", ")}`;
+      }
+      if (result.linked > 0) {
+        message += `. Linked ${plural(result.linked, "entry", "entries")} you logged to ${accountName(preview.account_id)}`;
+      }
+      if (result.transfers_paired > 0) {
+        message += `. Paired ${plural(result.transfers_paired, "transfer")} with your other account`;
+      }
       if (busiest) {
         const [y, m] = busiest.split("-").map(Number);
         setYear(y);
@@ -800,7 +1095,7 @@ function App() {
         setNotice(`Removed ${plural(result.deleted, "transaction")} from ${batch.file_name}`);
         reload();
       },
-      "Undo import"
+      { actionLabel: "Undo import" }
     );
   }
 
@@ -813,9 +1108,19 @@ function App() {
   const unbudgetedCategories = expenseCategories.filter((c) => !budgetedIds.has(c.id));
   const totalBudgeted = budgets.reduce((sum, b) => sum + b.amount, 0);
 
-  const shownTransactions = accountFilter
-    ? transactions.filter((tx) => String(tx.account_id) === accountFilter)
-    : transactions;
+  // Transactions list: (month or all-time search) -> account -> search text -> pill.
+  const searchTerm = search.trim().toLowerCase().replace(/,/g, "");
+  const allTime = searchScope === "all" && searchTerm.length >= 2;
+  const matchesSearch = (tx) =>
+    !searchTerm ||
+    [tx.description, categoryName(tx.category_id), accountName(tx.account_id), tx.amount.toFixed(2)].some((text) =>
+      text.toLowerCase().replace(/,/g, "").includes(searchTerm)
+    );
+  const beforePills = (allTime ? allTimeResults : transactions)
+    .filter((tx) => !accountFilter || String(tx.account_id) === accountFilter)
+    .filter(matchesSearch);
+  const pillTest = TRANSACTION_FILTERS.find(([id]) => id === typeFilter)[2];
+  const shownTransactions = beforePills.filter(pillTest);
 
   const spendingRanked = monthly?.spending_by_category.filter((row) => row.amount > 0) ?? [];
   const budgetLines = monthly?.categories.filter((line) => line.budgeted > 0) ?? [];
@@ -828,6 +1133,7 @@ function App() {
   const yearTopCategory = yearly?.spending_by_category.find((row) => row.amount > 0);
 
   const previewRows = preview?.rows ?? [];
+  const popupOpen = Boolean(preview || editTx || editAccount || editCategory || editBudget || confirmBox);
   const includedRows = previewRows.filter((row) => row.include);
   const previewIncome = includedRows.filter((r) => r.type === "income").reduce((s, r) => s + r.amount, 0);
   const previewSpending = includedRows.reduce(
@@ -835,14 +1141,36 @@ function App() {
     0
   );
   const previewDates = previewRows.map((r) => r.date).sort();
-  const flagCount = (flag) => previewRows.filter((r) => r.flag === flag).length;
+  const previewTerm = previewSearch.trim().toLowerCase().replace(/,/g, "");
+  const previewSearched = previewRows.filter(
+    (row) =>
+      !previewTerm ||
+      [row.description, categoryName(row.category_id), row.amount.toFixed(2)].some((text) =>
+        text.toLowerCase().replace(/,/g, "").includes(previewTerm)
+      )
+  );
+  const previewTest = PREVIEW_FILTERS.find(([id]) => id === previewFilter)[2];
+  const visiblePreviewRows = previewSearched.filter(previewTest);
+  const visibleKeys = new Set(visiblePreviewRows.map((row) => row.key));
+
+  // Why a row got its category, shown under the dropdown in the preview.
+  function categoryHint(row) {
+    if (row.type === "transfer" || row.category_id === null) return null;
+    if (row.category_source === "rule") return `keyword: ${row.rule_keyword}`;
+    if (row.category_source === "history") return "from your history";
+    if (row.category_source === "fee") return "bank fee";
+    if (row.category_source === "csv") return "from your CSV";
+    if (row.category_source === "same") return `same as other ${row.keyword} rows`;
+    if (row.category_source === "reversal") return `same as the purchase it refunds`;
+    return null;
+  }
 
   // ================================================================ render
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
       <div className="mx-auto max-w-6xl px-4 py-8 sm:py-10">
         {/* ---------------- HEADER + MONTH PICKER ---------------- */}
-        <header className="mb-8 flex flex-wrap items-center justify-between gap-4">
+        <header className="mb-8 flex flex-wrap items-center gap-3">
           <div className="flex items-center gap-3">
             <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-slate-900 text-lg font-semibold text-white">
               $
@@ -853,12 +1181,14 @@ function App() {
             </div>
           </div>
 
-          <div className="flex items-center gap-1 rounded-xl border border-slate-200 bg-white p-1 shadow-sm">
+          {/* Month picker + theme switch, kept together on the right */}
+          <div className="ml-auto flex items-center gap-2">
+          <div className="flex items-center gap-0.5 rounded-xl border border-slate-200 bg-white p-1 shadow-sm">
             <button className={iconBtn} onClick={() => goToMonth(-1)} aria-label="Previous month">
               <ChevronLeft className="h-4 w-4" />
             </button>
             <select
-              className="rounded-md bg-transparent px-2 py-1 text-sm font-medium focus:outline-none"
+              className="rounded-md bg-transparent px-1 py-1 text-sm font-medium focus:outline-none sm:px-2"
               value={month}
               onChange={(event) => setMonth(Number(event.target.value))}
               aria-label="Month"
@@ -870,7 +1200,7 @@ function App() {
               ))}
             </select>
             <select
-              className="rounded-md bg-transparent px-2 py-1 text-sm font-medium focus:outline-none"
+              className="rounded-md bg-transparent px-1 py-1 text-sm font-medium focus:outline-none sm:px-2"
               value={year}
               onChange={(event) => setYear(Number(event.target.value))}
               aria-label="Year"
@@ -885,12 +1215,39 @@ function App() {
               <ChevronRight className="h-4 w-4" />
             </button>
           </div>
+
+          <div
+            className="flex items-center gap-0.5 rounded-xl border border-slate-200 bg-white p-1 shadow-sm"
+            role="group"
+            aria-label="Theme"
+          >
+            {[
+              ["system", Monitor, "System"],
+              ["light", Sun, "Light"],
+              ["dark", Moon, "Dark"],
+            ].map(([value, Icon, text]) => (
+              <button
+                key={value}
+                type="button"
+                title={`${text} theme`}
+                aria-label={`${text} theme`}
+                aria-pressed={theme === value}
+                onClick={() => setTheme(value)}
+                className={`rounded-md p-1 transition-colors sm:p-1.5 ${
+                  theme === value ? "bg-slate-100 text-slate-900" : "text-slate-400 hover:text-slate-700"
+                }`}
+              >
+                <Icon className="h-4 w-4" />
+              </button>
+            ))}
+          </div>
+          </div>
         </header>
 
         {loading && <p className="text-slate-500">Loading...</p>}
 
         {loadError && (
-          <div className="mb-6 flex flex-wrap items-center justify-between gap-3 rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700">
+          <div className="mb-6 flex flex-wrap items-center justify-between gap-3 rounded-xl bg-rose-50 px-4 py-3 text-sm text-rose-700 dark:bg-rose-950/40 dark:text-rose-300">
             <span>Couldn't load your data: {loadError}</span>
             <button className={secondaryBtn} onClick={reload}>
               Try again
@@ -902,10 +1259,11 @@ function App() {
           <div className="space-y-6">
             {/* ---------------- GETTING STARTED ---------------- */}
             {accounts.length === 0 && (
-              <section className="rounded-2xl border border-blue-200 bg-blue-50/60 p-5 text-sm text-slate-700">
+              <section className="rounded-2xl border border-blue-200 bg-blue-50/60 p-5 text-sm text-slate-700 dark:border-blue-900/60 dark:bg-blue-950/30">
                 <p className="font-medium text-slate-900">Start here</p>
                 <ol className="mt-2 list-inside list-decimal space-y-1">
                   <li>Add your bank account under Accounts (only the last 4 digits).</li>
+                  <li>Add categories under Categories, or one click for the suggested set.</li>
                   <li>Import that account's statement to bring in the month's income and spending.</li>
                   <li>Set this month's budgets, then log anything paid in cash as you go.</li>
                 </ol>
@@ -925,7 +1283,7 @@ function App() {
                   value={formatMoney(Math.abs(monthly.net))}
                   note={
                     monthly.net < 0 ? (
-                      <span className="flex items-center gap-1 text-rose-700">
+                      <span className="flex items-center gap-1 text-rose-700 dark:text-rose-400">
                         <TriangleAlert className="h-3.5 w-3.5" /> You spent more than came in
                       </span>
                     ) : savedShare !== null ? (
@@ -955,12 +1313,12 @@ function App() {
                     <li className="flex items-center gap-1.5">
                       {overLines.length === 0 ? (
                         <>
-                          <CircleCheck className="h-4 w-4 text-emerald-600" />
+                          <CircleCheck className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
                           All {plural(budgetLines.length, "budget")} on track.
                         </>
                       ) : (
                         <>
-                          <TriangleAlert className="h-4 w-4 text-rose-600" />
+                          <TriangleAlert className="h-4 w-4 text-rose-600 dark:text-rose-400" />
                           {budgetLines.length - overLines.length} of {plural(budgetLines.length, "budget")} on
                           track; over in {overLines.map((l) => l.category).join(", ")}.
                         </>
@@ -999,7 +1357,7 @@ function App() {
                                 style={{ width: `${fill}%`, backgroundColor: over ? OVER_COLOR : SPENDING_COLOR }}
                               />
                             </div>
-                            <p className={`mt-1 flex items-center gap-1 text-xs ${over ? "text-rose-700" : "text-slate-500"}`}>
+                            <p className={`mt-1 flex items-center gap-1 text-xs ${over ? "text-rose-700 dark:text-rose-400" : "text-slate-500"}`}>
                               {over ? (
                                 <>
                                   <TriangleAlert className="h-3.5 w-3.5" /> Over by {formatMoney(-line.remaining)}
@@ -1125,13 +1483,44 @@ function App() {
                   </button>
                 </div>
 
+                {/* Search + filters */}
+                <div className="mt-5 flex flex-wrap items-center gap-2">
+                  <SearchBox value={search} onChange={setSearch} placeholder="Search transactions" />
+                  <div className="flex rounded-lg border border-slate-200 p-0.5 text-xs">
+                    {[
+                      ["month", MONTHS_SHORT[month - 1]],
+                      ["all", "All time"],
+                    ].map(([scope, label]) => (
+                      <button
+                        key={scope}
+                        type="button"
+                        aria-pressed={searchScope === scope}
+                        className={`rounded-md px-2.5 py-1.5 font-medium ${searchScope === scope ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-50"}`}
+                        onClick={() => setSearchScope(scope)}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                <div className="mt-3">
+                  <FilterChips filters={TRANSACTION_FILTERS} rows={beforePills} value={typeFilter} onChange={setTypeFilter} />
+                </div>
+
                 {/* List */}
-                <p className="mt-5 text-xs text-slate-400">
-                  {plural(shownTransactions.length, "transaction")} in {periodName}
+                <p className="mt-3 text-xs text-slate-400">
+                  {allTime
+                    ? `${plural(shownTransactions.length, "match", "matches")} across all months`
+                    : shownTransactions.length === transactions.length
+                      ? `${plural(transactions.length, "transaction")} in ${periodName}`
+                      : `${shownTransactions.length} of ${plural(transactions.length, "transaction")} in ${periodName}`}
+                  {searchScope === "all" && searchTerm.length < 2 && " · type at least 2 letters to search all months"}
                 </p>
                 {shownTransactions.length === 0 ? (
                   <p className="mt-2 text-sm text-slate-400">
-                    Nothing here yet. Add one above or import a statement.
+                    {transactions.length === 0 && !allTime
+                      ? "Nothing here yet. Add one above or import a statement."
+                      : "Nothing matches. Try another pill or search."}
                   </p>
                 ) : (
                   <ul className="mt-1 max-h-[34rem] divide-y divide-slate-100 overflow-y-auto pr-1">
@@ -1142,7 +1531,7 @@ function App() {
                           <div className="min-w-0">
                             <p className="truncate text-sm font-medium text-slate-900">{tx.description}</p>
                             <p className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-xs text-slate-400">
-                              <span>{formatDate(tx.date)}</span>
+                              <span>{formatDate(tx.date, allTime)}</span>
                               <span>·</span>
                               <span>{tx.type === "transfer" ? "Transfer" : categoryName(tx.category_id)}</span>
                               <span>·</span>
@@ -1160,7 +1549,7 @@ function App() {
                                 tx.type === "transfer"
                                   ? "text-slate-500"
                                   : moneyIn
-                                    ? "text-emerald-700"
+                                    ? "text-emerald-700 dark:text-emerald-400"
                                     : "text-slate-900"
                               }`}
                             >
@@ -1264,7 +1653,7 @@ function App() {
                               </p>
                             </div>
                             <button
-                              className={`${iconBtn} flex shrink-0 items-center gap-1 text-xs font-medium hover:text-rose-600`}
+                              className={`${iconBtn} flex shrink-0 items-center gap-1 text-xs font-medium hover:text-rose-600 dark:hover:text-rose-400`}
                               onClick={() => handleUndoImport(batch)}
                               aria-label={`Undo import of ${batch.file_name}`}
                             >
@@ -1276,7 +1665,8 @@ function App() {
                       {imports.length > 3 && (
                         <button
                           className="mt-1 text-xs font-medium text-slate-500 hover:text-slate-800"
-                          onClick={() => setShowAllImports(!showAllImports)}>
+                          onClick={() => setShowAllImports(!showAllImports)}
+                        >
                           {showAllImports ? "Show fewer" : `Show all ${imports.length}`}
                         </button>
                       )}
@@ -1299,7 +1689,8 @@ function App() {
                             <EditButtons
                               name={`${categoryName(budget.category_id)} budget`}
                               onEdit={() => setEditBudget({ ...budget, amount: String(budget.amount) })}
-                              onDelete={() => handleDeleteBudget(budget)}/>
+                              onDelete={() => handleDeleteBudget(budget)}
+                            />
                           </div>
                         </li>
                       ))}
@@ -1320,7 +1711,8 @@ function App() {
                         className={`${input} col-span-2`}
                         value={newBudget.category_id}
                         onChange={(event) => setNewBudget({ ...newBudget, category_id: event.target.value })}
-                        aria-label="Budget category">
+                        aria-label="Budget category"
+                      >
                         <option value="">Choose category</option>
                         {unbudgetedCategories.map((c) => (
                           <option key={c.id} value={c.id}>
@@ -1335,7 +1727,8 @@ function App() {
                         step="0.01"
                         placeholder="Amount"
                         value={newBudget.amount}
-                        onChange={(event) => setNewBudget({ ...newBudget, amount: event.target.value })}/>
+                        onChange={(event) => setNewBudget({ ...newBudget, amount: event.target.value })}
+                      />
                       <button className={primaryBtn} onClick={handleAddBudget} disabled={busy}>
                         Add budget
                       </button>
@@ -1368,7 +1761,8 @@ function App() {
                         <EditButtons
                           name={a.nickname}
                           onEdit={() => setEditAccount({ ...a })}
-                          onDelete={() => handleDeleteAccount(a)}/>
+                          onDelete={() => handleDeleteAccount(a)}
+                        />
                       </li>
                     ))}
                   </ul>
@@ -1378,17 +1772,20 @@ function App() {
                     className={`${input} col-span-2`}
                     placeholder="Nickname (e.g. NCB Savings)"
                     value={newAccount.nickname}
-                    onChange={(event) => setNewAccount({ ...newAccount, nickname: event.target.value })}/>
+                    onChange={(event) => setNewAccount({ ...newAccount, nickname: event.target.value })}
+                  />
                   <input
                     className={input}
                     placeholder="Bank"
                     value={newAccount.bank_name}
-                    onChange={(event) => setNewAccount({ ...newAccount, bank_name: event.target.value })}/>
+                    onChange={(event) => setNewAccount({ ...newAccount, bank_name: event.target.value })}
+                  />
                   <select
                     className={input}
                     value={newAccount.account_type}
                     onChange={(event) => setNewAccount({ ...newAccount, account_type: event.target.value })}
-                    aria-label="Account type">
+                    aria-label="Account type"
+                  >
                     {Object.entries(ACCOUNT_TYPE_LABELS).map(([value, text]) => (
                       <option key={value} value={value}>
                         {text}
@@ -1402,7 +1799,8 @@ function App() {
                     value={newAccount.last_four}
                     onChange={(event) =>
                       setNewAccount({ ...newAccount, last_four: event.target.value.replace(/\D/g, "").slice(0, 4) })
-                    }/>
+                    }
+                  />
                   <button className={primaryBtn} onClick={handleAddAccount} disabled={busy}>
                     Add account
                   </button>
@@ -1415,6 +1813,17 @@ function App() {
               <section className={card}>
                 <p className={eyebrow}>Setup</p>
                 <h2 className={`${heading} mb-4`}>Categories</h2>
+                {expenseCategories.filter((c) => c.name !== "Bank Fees").length === 0 && (
+                  <div className="mb-4 rounded-xl border border-dashed border-slate-300 p-4 text-sm text-slate-600">
+                    <p>
+                      Start with suggested categories (Food &amp; Dining, Groceries, Transport &amp; Gas and more), with
+                      keywords for common places so imports are categorized for you.
+                    </p>
+                    <button className={`${secondaryBtn} mt-3`} onClick={handleAddSuggested} disabled={busy}>
+                      Add suggested categories
+                    </button>
+                  </div>
+                )}
                 {categories.length === 0 ? (
                   <p className="text-sm text-slate-400">No categories yet.</p>
                 ) : (
@@ -1429,11 +1838,20 @@ function App() {
                           <ul className="divide-y divide-slate-100">
                             {list.map((c) => (
                               <li key={c.id} className="flex items-center justify-between gap-2 py-1.5 text-sm">
-                                <span className="truncate text-slate-700">{c.name}</span>
+                                <span className="truncate text-slate-700">
+                                  {c.name}
+                                  {keywordCount(c.id) > 0 && (
+                                    <span className="text-xs text-slate-400"> · {plural(keywordCount(c.id), "keyword")}</span>
+                                  )}
+                                </span>
                                 <EditButtons
                                   name={c.name}
-                                  onEdit={() => setEditCategory({ ...c })}
-                                  onDelete={() => handleDeleteCategory(c)}/>
+                                  onEdit={() => {
+                                    setNewKeyword("");
+                                    setEditCategory({ ...c });
+                                  }}
+                                  onDelete={() => handleDeleteCategory(c)}
+                                />
                               </li>
                             ))}
                           </ul>
@@ -1447,12 +1865,14 @@ function App() {
                     className={input}
                     placeholder="New category name"
                     value={newCategory.name}
-                    onChange={(event) => setNewCategory({ ...newCategory, name: event.target.value })}/>
+                    onChange={(event) => setNewCategory({ ...newCategory, name: event.target.value })}
+                  />
                   <select
                     className={input}
                     value={newCategory.kind}
                     onChange={(event) => setNewCategory({ ...newCategory, kind: event.target.value })}
-                    aria-label="Category kind">
+                    aria-label="Category kind"
+                  >
                     <option value="expense">Spending</option>
                     <option value="income">Income</option>
                   </select>
@@ -1475,7 +1895,8 @@ function App() {
                     <button
                       key={view}
                       className={`rounded-md px-3 py-1 capitalize ${yearView === view ? "bg-slate-900 text-white" : "text-slate-600 hover:bg-slate-50"}`}
-                      onClick={() => setYearView(view)}>
+                      onClick={() => setYearView(view)}
+                    >
                       {view}
                     </button>
                   ))}
@@ -1489,7 +1910,8 @@ function App() {
                 <StatTile
                   label="Savings rate"
                   value={yearly.savings_rate === null ? "—" : `${yearly.savings_rate}%`}
-                  note={yearly.savings_rate === null ? "No income recorded yet" : "of income kept"}/>
+                  note={yearly.savings_rate === null ? "No income recorded yet" : "of income kept"}
+                />
               </div>
 
               <div className="mt-6">
@@ -1512,7 +1934,7 @@ function App() {
                             <td className="py-2 text-slate-700">{MONTHS[m.month - 1]}</td>
                             <td className="py-2 text-right">{formatMoney(m.income)}</td>
                             <td className="py-2 text-right">{formatMoney(m.spending)}</td>
-                            <td className={`py-2 text-right ${m.net < 0 ? "text-rose-700" : ""}`}>{formatMoney(m.net)}</td>
+                            <td className={`py-2 text-right ${m.net < 0 ? "text-rose-700 dark:text-rose-400" : ""}`}>{formatMoney(m.net)}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -1542,7 +1964,7 @@ function App() {
                     <ul className="space-y-3 text-sm text-slate-600">
                       {yearly.over_budget.map((row) => (
                         <li key={row.category} className="flex gap-2">
-                          <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-rose-600" />
+                          <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-rose-600 dark:text-rose-400" />
                           <span>
                             <span className="font-medium text-slate-900">{row.category}</span> went over budget in{" "}
                             {row.months_over} of {plural(row.months_budgeted, "budgeted month")}.
@@ -1551,7 +1973,7 @@ function App() {
                       ))}
                       {overspentMonths.length > 0 && (
                         <li className="flex gap-2">
-                          <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-rose-600" />
+                          <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0 text-rose-600 dark:text-rose-400" />
                           <span>
                             You spent more than came in during{" "}
                             {overspentMonths.map((m) => MONTHS_SHORT[m.month - 1]).join(", ")}.
@@ -1578,7 +2000,7 @@ function App() {
                       )}
                       {yearly.over_budget.length === 0 && overspentMonths.length === 0 && (
                         <li className="flex gap-2">
-                          <CircleCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" />
+                          <CircleCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
                           <span>No budget went over and no month spent more than came in.</span>
                         </li>
                       )}
@@ -1616,9 +2038,26 @@ function App() {
                 Import {plural(includedRows.length, "transaction")}
               </button>
             </>
-          }>
+          }
+        >
+          {previewRows.length > 0 && previewRows.every((row) => row.flag === "duplicate") && (
+            <div className="mb-4 rounded-lg bg-slate-100 px-4 py-3 text-sm text-slate-700">
+              <p className="font-medium text-slate-900">
+                Everything in this statement is already imported
+                {[...new Set(previewRows.map((row) => row.imported_from).filter(Boolean))].length > 0 &&
+                  ` (from ${[...new Set(previewRows.map((row) => row.imported_from).filter(Boolean))].join(", ")})`}
+                .
+              </p>
+              <p className="mt-1">
+                Nothing new to add, so the rows can't be ticked (that would count them twice). To import it again,
+                close this, click <span className="font-medium">Undo</span> on it under Recent imports, then preview it
+                again.
+              </p>
+            </div>
+          )}
+
           {preview.problems.length > 0 && (
-            <div className="mb-4 rounded-lg bg-amber-50 px-4 py-3 text-sm text-amber-900">
+            <div className="mb-4 rounded-lg bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
               <p className="flex items-center gap-1.5 font-medium">
                 <TriangleAlert className="h-4 w-4" /> Check these before importing:
               </p>
@@ -1630,22 +2069,31 @@ function App() {
             </div>
           )}
 
-          <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs text-slate-500">
-            {["duplicate", "match", "review"].map((flag) =>
-              flagCount(flag) > 0 ? (
-                <span key={flag}>
-                  <FlagBadge flag={flag} /> {flagCount(flag)}
-                </span>
-              ) : null
+          <div className="mb-3 space-y-3">
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+              <SearchBox value={previewSearch} onChange={setPreviewSearch} placeholder="Search rows" />
+              <span className="flex gap-3 text-xs">
+                <button
+                  className="font-medium text-slate-700 hover:underline"
+                  onClick={() => setAllIncluded(true, visibleKeys)}
+                >
+                  Select all
+                </button>
+                <button
+                  className="font-medium text-slate-700 hover:underline"
+                  onClick={() => setAllIncluded(false, visibleKeys)}
+                >
+                  Select none
+                </button>
+              </span>
+            </div>
+            <FilterChips filters={PREVIEW_FILTERS} rows={previewSearched} value={previewFilter} onChange={setPreviewFilter} />
+            {(previewFilter !== "all" || previewTerm) && (
+              <p className="text-xs text-slate-500">
+                Showing {visiblePreviewRows.length} of {previewRows.length}. Import still takes every ticked row, shown or
+                not.
+              </p>
             )}
-            <span className="ml-auto flex gap-3">
-              <button className="font-medium text-slate-700 hover:underline" onClick={() => setAllIncluded(true)}>
-                Select all
-              </button>
-              <button className="font-medium text-slate-700 hover:underline" onClick={() => setAllIncluded(false)}>
-                Select none
-              </button>
-            </span>
           </div>
 
           <div className="overflow-x-auto">
@@ -1661,7 +2109,7 @@ function App() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {previewRows.map((row) => {
+                {visiblePreviewRows.map((row) => {
                   const moneyIn = row.type === "income" || row.type === "refund";
                   return (
                     <tr key={row.key} className={row.include ? "" : "opacity-50"}>
@@ -1672,13 +2120,17 @@ function App() {
                           checked={row.include}
                           disabled={row.flag === "duplicate"}
                           onChange={(event) => updatePreviewRow(row.key, { include: event.target.checked })}
-                          aria-label={`Import ${row.description}`}/>
+                          aria-label={`Import ${row.description}`}
+                        />
                       </td>
                       <td className="py-2 align-top whitespace-nowrap text-slate-500">{formatDate(row.date)}</td>
                       <td className="py-2 pr-3 align-top">
                         <span className="text-slate-900">{row.description}</span>
                         <FlagBadge flag={row.flag} />
                         {row.note && <p className="mt-0.5 text-xs text-slate-500">{row.note}</p>}
+                        {!row.note && row.reverses && (
+                          <p className="mt-0.5 text-xs text-slate-500">Refund of {row.reverses}</p>
+                        )}
                       </td>
                       <td className="py-2 pr-2 align-top">
                         <select
@@ -1687,12 +2139,15 @@ function App() {
                           onChange={(event) => {
                             const type = event.target.value;
                             const current = categories.find((c) => c.id === toId(row.category_id));
+                            const keep = categoryFits(current, type);
                             updatePreviewRow(row.key, {
                               type,
-                              category_id: categoryFits(current, type) ? row.category_id : null,
+                              category_id: keep ? row.category_id : null,
+                              category_source: keep ? row.category_source : null,
                             });
                           }}
-                          aria-label="Type">
+                          aria-label="Type"
+                        >
                           {Object.entries(TYPE_LABELS).map(([value, text]) => (
                             <option key={value} value={value}>
                               {text}
@@ -1705,8 +2160,9 @@ function App() {
                           className={smallInput}
                           value={row.type === "transfer" ? "" : (row.category_id ?? "")}
                           disabled={row.type === "transfer"}
-                          onChange={(event) => updatePreviewRow(row.key, { category_id: toId(event.target.value) })}
-                          aria-label="Category">
+                          onChange={(event) => setPreviewCategory(row, toId(event.target.value))}
+                          aria-label="Category"
+                        >
                           <option value="">{row.type === "transfer" ? "—" : "Uncategorized"}</option>
                           {categoriesFor(row.type).map((c) => (
                             <option key={c.id} value={c.id}>
@@ -1714,11 +2170,17 @@ function App() {
                             </option>
                           ))}
                         </select>
+                        {categoryHint(row) && (
+                          <p className="mt-0.5 truncate text-[11px] text-slate-400" title={categoryHint(row)}>
+                            {categoryHint(row)}
+                          </p>
+                        )}
                       </td>
                       <td
                         className={`py-2 text-right align-top font-medium whitespace-nowrap tabular-nums ${
-                          row.type === "transfer" ? "text-slate-500" : moneyIn ? "text-emerald-700" : "text-slate-900"
-                        }`}>
+                          row.type === "transfer" ? "text-slate-500" : moneyIn ? "text-emerald-700 dark:text-emerald-400" : "text-slate-900"
+                        }`}
+                      >
                         {row.type === "transfer" ? "" : moneyIn ? "+" : "−"}
                         {formatMoney(row.amount)}
                       </td>
@@ -1728,6 +2190,13 @@ function App() {
               </tbody>
             </table>
           </div>
+          {visiblePreviewRows.length === 0 && (
+            <p className="py-6 text-center text-sm text-slate-400">
+              {previewFilter === "needs" && !previewTerm
+                ? "Everything has a category."
+                : "No rows match. Try another pill or search."}
+            </p>
+          )}
 
           {/* Missing a category while reviewing? Add it without leaving. */}
           <div className="mt-4 flex flex-wrap items-center gap-2 rounded-lg bg-slate-50 p-3">
@@ -1736,12 +2205,14 @@ function App() {
               className={`${smallInputBox} w-44`}
               placeholder="Name"
               value={newCategory.name}
-              onChange={(event) => setNewCategory({ ...newCategory, name: event.target.value })}/>
+              onChange={(event) => setNewCategory({ ...newCategory, name: event.target.value })}
+            />
             <select
               className={`${smallInputBox} w-28`}
               value={newCategory.kind}
               onChange={(event) => setNewCategory({ ...newCategory, kind: event.target.value })}
-              aria-label="Category kind">
+              aria-label="Category kind"
+            >
               <option value="expense">Spending</option>
               <option value="income">Income</option>
             </select>
@@ -1767,13 +2238,15 @@ function App() {
                 Save
               </button>
             </>
-          }>
+          }
+        >
           <div className="grid grid-cols-2 gap-3">
             <Field label="Type">
               <select
                 className={input}
                 value={editTx.type}
-                onChange={(event) => setEditTx(withType(editTx, event.target.value))}>
+                onChange={(event) => setEditTx(withType(editTx, event.target.value))}
+              >
                 {Object.entries(TYPE_LABELS).map(([value, text]) => (
                   <option key={value} value={value}>
                     {text}
@@ -1788,26 +2261,30 @@ function App() {
                 min="0"
                 step="0.01"
                 value={editTx.amount}
-                onChange={(event) => setEditTx({ ...editTx, amount: event.target.value })}/>
+                onChange={(event) => setEditTx({ ...editTx, amount: event.target.value })}
+              />
             </Field>
             <Field label="Description" className="col-span-2">
               <input
                 className={input}
                 value={editTx.description}
-                onChange={(event) => setEditTx({ ...editTx, description: event.target.value })}/>
+                onChange={(event) => setEditTx({ ...editTx, description: event.target.value })}
+              />
             </Field>
             <Field label="Date">
               <input
                 className={input}
                 type="date"
                 value={editTx.date}
-                onChange={(event) => setEditTx({ ...editTx, date: event.target.value })}/>
+                onChange={(event) => setEditTx({ ...editTx, date: event.target.value })}
+              />
             </Field>
             <Field label="Account">
               <select
                 className={input}
                 value={editTx.account_id}
-                onChange={(event) => setEditTx({ ...editTx, account_id: event.target.value })}>
+                onChange={(event) => setEditTx({ ...editTx, account_id: event.target.value })}
+              >
                 <option value="">Cash / no account</option>
                 {accounts.map((a) => (
                   <option key={a.id} value={a.id}>
@@ -1821,7 +2298,8 @@ function App() {
                 className={input}
                 value={editTx.type === "transfer" ? "" : editTx.category_id}
                 disabled={editTx.type === "transfer"}
-                onChange={(event) => setEditTx({ ...editTx, category_id: event.target.value })}>
+                onChange={(event) => changeEditCategory(event.target.value)}
+              >
                 <option value="">{editTx.type === "transfer" ? "No category for transfers" : "Uncategorized"}</option>
                 {categoriesFor(editTx.type).map((c) => (
                   <option key={c.id} value={c.id}>
@@ -1830,6 +2308,41 @@ function App() {
                 ))}
               </select>
             </Field>
+            {learnHint && learnHint.categoryId === toId(editTx.category_id) && editTx.type !== "transfer" && (
+              <div className="col-span-2 space-y-2 rounded-lg bg-slate-50 p-3 text-sm text-slate-700">
+                {learnHint.rule_category_id !== learnHint.categoryId && (
+                  <label className="flex items-start gap-2">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5 h-4 w-4 shrink-0 accent-slate-900"
+                      checked={learnHint.remember}
+                      onChange={(event) => setLearnHint({ ...learnHint, remember: event.target.checked })}
+                    />
+                    <span>
+                      Use <span className="font-medium">{categoryName(learnHint.categoryId)}</span> for{" "}
+                      <span className="font-medium">{learnHint.keyword}</span> from now on
+                      {learnHint.rule_category_id && (
+                        <span className="text-slate-500"> (now {categoryName(learnHint.rule_category_id)})</span>
+                      )}
+                    </span>
+                  </label>
+                )}
+                {learnHint.others > 0 && (
+                  <label className="flex items-start gap-2">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5 h-4 w-4 shrink-0 accent-slate-900"
+                      checked={learnHint.applyOthers}
+                      onChange={(event) => setLearnHint({ ...learnHint, applyOthers: event.target.checked })}
+                    />
+                    <span>
+                      Also change the other {plural(learnHint.others, "transaction")} from{" "}
+                      <span className="font-medium">{learnHint.keyword}</span>
+                    </span>
+                  </label>
+                )}
+              </div>
+            )}
           </div>
         </Modal>
       )}
@@ -1848,25 +2361,29 @@ function App() {
                 Save
               </button>
             </>
-          }>
+          }
+        >
           <div className="grid grid-cols-2 gap-3">
             <Field label="Nickname" className="col-span-2">
               <input
                 className={input}
                 value={editAccount.nickname}
-                onChange={(event) => setEditAccount({ ...editAccount, nickname: event.target.value })}/>
+                onChange={(event) => setEditAccount({ ...editAccount, nickname: event.target.value })}
+              />
             </Field>
             <Field label="Bank">
               <input
                 className={input}
                 value={editAccount.bank_name}
-                onChange={(event) => setEditAccount({ ...editAccount, bank_name: event.target.value })}/>
+                onChange={(event) => setEditAccount({ ...editAccount, bank_name: event.target.value })}
+              />
             </Field>
             <Field label="Type">
               <select
                 className={input}
                 value={editAccount.account_type}
-                onChange={(event) => setEditAccount({ ...editAccount, account_type: event.target.value })}>
+                onChange={(event) => setEditAccount({ ...editAccount, account_type: event.target.value })}
+              >
                 {Object.entries(ACCOUNT_TYPE_LABELS).map(([value, text]) => (
                   <option key={value} value={value}>
                     {text}
@@ -1881,7 +2398,8 @@ function App() {
                 value={editAccount.last_four}
                 onChange={(event) =>
                   setEditAccount({ ...editAccount, last_four: event.target.value.replace(/\D/g, "").slice(0, 4) })
-                }/>
+                }
+              />
             </Field>
           </div>
         </Modal>
@@ -1901,23 +2419,71 @@ function App() {
                 Save
               </button>
             </>
-          }>
+          }
+        >
           <div className="grid grid-cols-2 gap-3">
             <Field label="Name" className="col-span-2">
               <input
                 className={input}
                 value={editCategory.name}
-                onChange={(event) => setEditCategory({ ...editCategory, name: event.target.value })}/>
+                onChange={(event) => setEditCategory({ ...editCategory, name: event.target.value })}
+              />
             </Field>
             <Field label="Kind" className="col-span-2">
               <select
                 className={input}
                 value={editCategory.kind}
-                onChange={(event) => setEditCategory({ ...editCategory, kind: event.target.value })}>
+                onChange={(event) => setEditCategory({ ...editCategory, kind: event.target.value })}
+              >
                 <option value="expense">Spending</option>
                 <option value="income">Income</option>
               </select>
             </Field>
+          </div>
+
+          <div className="mt-5 border-t border-slate-100 pt-4">
+            <p className="text-sm font-medium text-slate-900">Keywords</p>
+            <p className="mt-0.5 text-xs text-slate-500">
+              Imported rows whose description contains one of these get this category. Changes here save right away.
+            </p>
+            {rules.filter((r) => r.category_id === editCategory.id).length === 0 ? (
+              <p className="mt-3 text-xs text-slate-400">No keywords yet.</p>
+            ) : (
+              <ul className="mt-3 flex flex-wrap gap-1.5">
+                {rules
+                  .filter((r) => r.category_id === editCategory.id)
+                  .map((rule) => (
+                    <li
+                      key={rule.id}
+                      className="flex items-center gap-1 rounded-full bg-slate-100 py-0.5 pr-1 pl-2.5 text-xs font-medium text-slate-700"
+                    >
+                      {rule.keyword}
+                      <button
+                        className="rounded-full p-0.5 text-slate-400 hover:bg-slate-200 hover:text-slate-700"
+                        onClick={() => handleDeleteKeyword(rule)}
+                        aria-label={`Remove keyword ${rule.keyword}`}
+                        disabled={busy}
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </li>
+                  ))}
+              </ul>
+            )}
+            <div className="mt-3 flex gap-2">
+              <input
+                className={input}
+                placeholder="Add a keyword, e.g. JUICI"
+                value={newKeyword}
+                onChange={(event) => setNewKeyword(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && newKeyword.trim()) handleAddKeyword();
+                }}
+              />
+              <button className={secondaryBtn} onClick={handleAddKeyword} disabled={busy || !newKeyword.trim()}>
+                Add
+              </button>
+            </div>
           </div>
         </Modal>
       )}
@@ -1937,7 +2503,8 @@ function App() {
                 Save
               </button>
             </>
-          }>
+          }
+        >
           <Field label="Amount">
             <input
               className={input}
@@ -1945,7 +2512,8 @@ function App() {
               min="0"
               step="0.01"
               value={editBudget.amount}
-              onChange={(event) => setEditBudget({ ...editBudget, amount: event.target.value })}/>
+              onChange={(event) => setEditBudget({ ...editBudget, amount: event.target.value })}
+            />
           </Field>
         </Modal>
       )}
@@ -1953,7 +2521,7 @@ function App() {
       {/* Are you sure? */}
       {confirmBox && (
         <Modal
-          title="Are you sure?"
+          title={confirmBox.title}
           onClose={() => setConfirmBox(null)}
           footer={
             <>
@@ -1961,29 +2529,36 @@ function App() {
                 Cancel
               </button>
               <button
-                className={dangerBtn}
+                className={confirmBox.danger ? dangerBtn : primaryBtn}
                 disabled={busy}
                 onClick={() =>
                   run(async () => {
                     await confirmBox.onConfirm();
                     setConfirmBox(null);
                   })
-                }>
+                }
+              >
                 {confirmBox.actionLabel}
               </button>
             </>
-          }>
+          }
+        >
           <p className="text-sm text-slate-600">{confirmBox.message}</p>
         </Modal>
       )}
 
       {/* ================================================================ TOASTS */}
       {(actionError || notice) && (
-        <div className="pointer-events-none fixed inset-x-0 bottom-4 z-[60] flex flex-col items-center gap-2 px-4">
+        <div
+          className={`pointer-events-none fixed inset-x-0 z-[60] flex flex-col items-center gap-2 px-4 ${
+            popupOpen ? "top-4" : "bottom-4"
+          }`}
+        >
           {actionError && (
             <div
               role="alert"
-              className="pointer-events-auto flex max-w-lg items-start gap-2 rounded-xl bg-rose-600 px-4 py-3 text-sm text-white shadow-lg">
+              className="pointer-events-auto flex max-w-lg items-start gap-2 rounded-xl bg-rose-600 px-4 py-3 text-sm text-[#fff] shadow-lg"
+            >
               <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
               <span>{actionError}</span>
               <button className="ml-2 opacity-80 hover:opacity-100" onClick={() => setActionError(null)} aria-label="Dismiss">
@@ -1994,8 +2569,9 @@ function App() {
           {notice && (
             <div
               role="status"
-              className="pointer-events-auto flex max-w-lg items-start gap-2 rounded-xl bg-slate-900 px-4 py-3 text-sm text-white shadow-lg">
-              <CircleCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" />
+              className="pointer-events-auto flex max-w-lg items-start gap-2 rounded-xl bg-slate-900 px-4 py-3 text-sm text-white shadow-lg"
+            >
+              <CircleCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400 dark:text-emerald-600" />
               <span>{notice}</span>
               <button className="ml-2 opacity-80 hover:opacity-100" onClick={() => setNotice(null)} aria-label="Dismiss">
                 <X className="h-4 w-4" />

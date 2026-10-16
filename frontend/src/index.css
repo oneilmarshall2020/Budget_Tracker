@@ -1,1 +1,48 @@
 @import "tailwindcss";
+
+/* ------------------------------------------------------------------ dark mode
+   `dark:` classes apply when <html> has the class "dark". The app adds or removes
+   that class from your choice (System / Light / Dark) in the header. */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* Chart colors live here so each theme can have its own (both pairs are checked
+   to stay tellable-apart for colorblind readers). */
+:root {
+  --chart-income: #2a78d6;
+  --chart-spending: #eb6834;
+  --chart-spending-track: #fbe2d7;
+  --chart-over: #d03b3b;
+  --chart-over-track: #f6d8d8;
+}
+
+/* Tailwind builds every color from a CSS variable: `bg-white` is
+   `background-color: var(--color-white)`, `text-slate-900` is
+   `color: var(--color-slate-900)`. So dark mode just flips the grey scale:
+   the lightest greys become the darkest and the other way round. Every card,
+   border and text in the app follows without touching the components.
+   Only the colored bits (badges, alerts, green/red amounts) need `dark:` classes. */
+.dark {
+  color-scheme: dark; /* native date pickers, dropdowns and scrollbars go dark too */
+
+  --color-white: #0f172a; /* cards, inputs, pop-ups */
+  --color-slate-50: #020617; /* page background, tiles */
+  --color-slate-100: #1a2435; /* dividers, chips, hover backgrounds */
+  --color-slate-200: #1e293b; /* card borders */
+  --color-slate-300: #334155; /* input borders */
+  --color-slate-400: #8392a8; /* faint text */
+  --color-slate-500: #94a3b8; /* secondary text */
+  --color-slate-600: #cbd5e1;
+  --color-slate-700: #e2e8f0;
+  --color-slate-800: #f1f5f9;
+  --color-slate-900: #f8fafc; /* main text, primary buttons */
+
+  --chart-income: #3987e5;
+  --chart-spending: #d95926;
+  --chart-spending-track: #3b2219;
+  --chart-over: #e05555;
+  --chart-over-track: #3d1c1c;
+}
+
+body {
+  background-color: var(--color-slate-50); /* so overscroll edges match the page */
+}

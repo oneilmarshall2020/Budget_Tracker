@@ -16,6 +16,16 @@ def clean_text(value: str | None, label: str) -> str | None:
     return cleaned
 
 
+def clean_keyword(value: str | None) -> str | None:
+    """Keywords are stored uppercase with single spaces: ' juici  patties' -> 'JUICI PATTIES'."""
+    if value is None:
+        return value
+    cleaned = " ".join(value.upper().split())
+    if len(cleaned) < 2:
+        raise ValueError("Keyword must be at least 2 characters")
+    return cleaned
+
+
 def clean_last_four(value: str | None) -> str | None:
     if value is None:
         return value
@@ -34,7 +44,7 @@ class TransactionType(str, Enum):
 
 
 class TransactionSource(str, Enum):
-    manual = "manual"        
+    manual = "manual"        # typed in by you
     statement = "statement"  # imported from a bank statement
 
 
@@ -132,6 +142,50 @@ class CategoryUpdate(SQLModel):
         return clean_text(value, "Category name")
 
 
+# ---------------------------------------------------------------- keyword rules
+class CategoryRule(SQLModel, table=True):
+    """keyword -> category. Descriptions containing the keyword get that category."""
+
+    __tablename__ = "category_rule"
+
+    id: int | None = Field(default=None, primary_key=True)
+    keyword: str = Field(unique=True)  # one category per keyword
+    category_id: int = Field(foreign_key="category.id")
+
+
+class RuleCreate(SQLModel):
+    keyword: str
+    category_id: int
+
+    @field_validator("keyword")
+    @classmethod
+    def check_keyword(cls, value):
+        return clean_keyword(value)
+
+
+class RuleApply(SQLModel):
+    """Give every transaction matching this keyword this category."""
+
+    keyword: str
+    category_id: int
+    exclude_id: int | None = None  # the one you just edited
+
+    @field_validator("keyword")
+    @classmethod
+    def check_keyword(cls, value):
+        return clean_keyword(value)
+
+
+class RuleUpdate(SQLModel):
+    keyword: str | None = None
+    category_id: int | None = None
+
+    @field_validator("keyword")
+    @classmethod
+    def check_keyword(cls, value):
+        return clean_keyword(value)
+
+
 # ---------------------------------------------------------------- budgets
 class Budget(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
@@ -164,7 +218,7 @@ class StatementImport(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     account_id: int | None = Field(default=None, foreign_key="account.id")
     file_name: str
-    # Stored in UTC (the universal clock); the browser shows it in local time.
+    # Stored in UTC (the universal clock); the browser shows it in your local time.
     imported_at: datetime.datetime = Field(
         default_factory=lambda: datetime.datetime.now(datetime.timezone.utc)
     )
@@ -238,3 +292,7 @@ class ImportConfirm(SQLModel):
     account_id: int
     file_name: str = "statement"
     rows: list[ImportRow]
+    # Entries you logged by hand that the review matched: link them to this account.
+    matched_ids: list[int] = []
+    # The other side of transfers between your accounts: mark those as transfers too.
+    transfer_pair_ids: list[int] = []

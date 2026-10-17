@@ -34,6 +34,7 @@ class Draft:
     match_id: int | None = None  # your hand-logged entry that this row is
     pair_id: int | None = None  # the other side of a transfer between your accounts
     reverses: str | None = None  # "APPLE.COM/BILL (Sep 13)" for a refund
+    imported_from: str | None = None  # file name of the import a duplicate came from
 
     @property
     def settled(self) -> bool:

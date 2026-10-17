@@ -138,6 +138,7 @@ def preview_statement(
     logged = [t for t in nearby if t.source == TransactionSource.manual]
 
     # ---------------------------------------------------------------- pass 2: exact duplicates
+    batch_names = {b.id: b.file_name for b in session.exec(select(StatementImport)).all()}
     used = set()
     for draft in drafts:
         duplicate = next(
@@ -152,7 +153,9 @@ def preview_statement(
         )
         if duplicate:
             used.add(duplicate.id)
-            draft.flag, draft.include, draft.note = "duplicate", False, "Already imported"
+            draft.flag, draft.include = "duplicate", False
+            draft.imported_from = batch_names.get(duplicate.import_id)
+            draft.note = f"Already imported from {draft.imported_from}" if draft.imported_from else "Already imported"
 
     # ---------------------------------------------------------------- pass 3: renamed (pending)
     open_drafts = [d for d in drafts if not d.settled]
@@ -288,6 +291,7 @@ def preview_statement(
             "match_id": draft.match_id,
             "pair_id": draft.pair_id,
             "reverses": draft.reverses,
+            "imported_from": draft.imported_from,
         })
 
     return {
@@ -298,13 +302,38 @@ def preview_statement(
     }
 
 
+def link_and_pair(session, payload: ImportConfirm) -> tuple[int, int]:
+    """Two follow-ups from the review, done even if no new rows are saved:
+    link your hand-logged entries to this account, and mark the other side of
+    transfers between your accounts as transfers. Returns (linked, transfers_paired)."""
+    linked = 0
+    for transaction_id in payload.matched_ids:
+        logged = session.get(Transaction, transaction_id)
+        if logged and logged.source == TransactionSource.manual and logged.account_id is None:
+            logged.account_id = payload.account_id
+            session.add(logged)
+            linked += 1
+
+    transfers_paired = 0
+    for transaction_id in payload.transfer_pair_ids:
+        other = session.get(Transaction, transaction_id)
+        if other and other.account_id not in (None, payload.account_id):
+            if other.type != TransactionType.transfer or other.category_id is not None:
+                other.type, other.category_id = TransactionType.transfer, None
+                session.add(other)
+            transfers_paired += 1
+    return linked, transfers_paired
+
+
 @router.post("/statement/confirm")
 def confirm_import(payload: ImportConfirm, session: SessionDep):
     """Save the rows you kept in the preview."""
     get_account_or_404(session, payload.account_id)
     if not payload.rows:
+        linked, transfers_paired = link_and_pair(session, payload)
+        session.commit()
         return {"created": [], "skipped": 0, "import_id": None, "keywords_learned": [],
-                "linked": 0, "transfers_paired": 0}
+                "linked": linked, "transfers_paired": transfers_paired}
 
     # Guard against saving the same statement twice (double click, re-import).
     low = min(r.date for r in payload.rows)
@@ -375,25 +404,7 @@ def confirm_import(payload: ImportConfirm, session: SessionDep):
                     rules.append(rule)
                     learned_keywords.append(keyword)
 
-    # Your hand-logged entries the review matched: they were paid from this account.
-    linked = 0
-    for transaction_id in payload.matched_ids:
-        logged = session.get(Transaction, transaction_id)
-        if logged and logged.source == TransactionSource.manual and logged.account_id is None:
-            logged.account_id = payload.account_id
-            session.add(logged)
-            linked += 1
-
-    # The other side of a transfer between your accounts is a transfer too
-    # (it may have been imported earlier as income or an expense).
-    transfers_paired = 0
-    for transaction_id in payload.transfer_pair_ids:
-        other = session.get(Transaction, transaction_id)
-        if other and other.account_id not in (None, payload.account_id):
-            if other.type != TransactionType.transfer or other.category_id is not None:
-                other.type, other.category_id = TransactionType.transfer, None
-                session.add(other)
-            transfers_paired += 1
+    linked, transfers_paired = link_and_pair(session, payload)
 
     if not created:
         session.delete(batch)  # everything was already there: nothing to undo later

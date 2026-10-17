@@ -3,13 +3,13 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from database import create_db_and_tables
+from migrate import run_migrations
 from routers import account, budget, categories, rules, statements, summaries, transaction
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    create_db_and_tables()
+    run_migrations()  # bring the tables up to date (backs up first if anything changes)
     yield
 
 

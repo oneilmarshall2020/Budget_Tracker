@@ -3,3 +3,9 @@ __pycache__/
 database.db
 .env
 *.pyc
+# macOS folder junk
+.DS_Store
+# database backups (your real data)
+backups/
+# the fake statements the tests use
+!tests/fixtures/*.pdf

@@ -3,7 +3,7 @@
   "rewrites": [
     {
       "source": "/api/(.*)",
-      "destination": "https://REPLACE-WITH-YOUR-BACKEND.vercel.app/$1"
+      "destination": "https://ledger-api-umber.vercel.app/$1"
     }
   ],
   "headers": [

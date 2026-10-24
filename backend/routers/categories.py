@@ -1,22 +1,21 @@
 from fastapi import APIRouter, HTTPException
 from sqlmodel import select
 
+from auth import CurrentUser
 from database import SessionDep
+from helpers import get_owned_or_404
 from models import Budget, Category, CategoryCreate, CategoryRule, CategoryUpdate, Transaction
 
 router = APIRouter(tags=["Categories"])
 
 
-def get_category_or_404(session, category_id: int) -> Category:
-    category = session.get(Category, category_id)
-    if not category:
-        raise HTTPException(status_code=404, detail="Category not found")
-    return category
+def get_category_or_404(session, category_id: int, user) -> Category:
+    return get_owned_or_404(session, Category, category_id, user, "Category")
 
 
 @router.post("/categories/")
-def create_category(category_in: CategoryCreate, session: SessionDep) -> Category:
-    category = Category(**category_in.model_dump())
+def create_category(category_in: CategoryCreate, session: SessionDep, user: CurrentUser) -> Category:
+    category = Category(**category_in.model_dump(), user_id=user.id)
     session.add(category)
     session.commit()
     session.refresh(category)
@@ -24,15 +23,17 @@ def create_category(category_in: CategoryCreate, session: SessionDep) -> Categor
 
 
 @router.get("/categories/")
-def read_categories(session: SessionDep) -> list[Category]:
-    return session.exec(select(Category).order_by(Category.name)).all()
+def read_categories(session: SessionDep, user: CurrentUser) -> list[Category]:
+    return session.exec(
+        select(Category).where(Category.user_id == user.id).order_by(Category.name)
+    ).all()
 
 
 @router.patch("/categories/{category_id}")
 def update_category(
-    category_id: int, category_update: CategoryUpdate, session: SessionDep
+    category_id: int, category_update: CategoryUpdate, session: SessionDep, user: CurrentUser
 ) -> Category:
-    category = get_category_or_404(session, category_id)
+    category = get_category_or_404(session, category_id, user)
     update_data = category_update.model_dump(exclude_unset=True, exclude_none=True)
 
     # Switching income <-> expense would leave existing transactions and budgets mismatched.
@@ -57,8 +58,8 @@ def update_category(
 
 
 @router.delete("/categories/{category_id}")
-def delete_category(category_id: int, session: SessionDep):
-    category = get_category_or_404(session, category_id)
+def delete_category(category_id: int, session: SessionDep, user: CurrentUser):
+    category = get_category_or_404(session, category_id, user)
 
     # A budget for a category that no longer exists is meaningless: delete it.
     budgets = session.exec(select(Budget).where(Budget.category_id == category_id)).all()

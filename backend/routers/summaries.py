@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException
 from sqlalchemy import case, extract, func
 from sqlmodel import select
 
+from auth import CurrentUser
 from database import SessionDep
 from helpers import month_bounds, year_bounds
 from models import Budget, Category, CategoryKind, Transaction, TransactionType
@@ -25,8 +26,14 @@ def money(value) -> float:
     return round(value or 0, 2)
 
 
-def category_names(session) -> dict[int, str]:
-    return {c.id: c.name for c in session.exec(select(Category)).all()}
+def user_categories(session, user) -> list[Category]:
+    return session.exec(
+        select(Category).where(Category.user_id == user.id).order_by(Category.name)
+    ).all()
+
+
+def category_names(session, user) -> dict[int, str]:
+    return {c.id: c.name for c in user_categories(session, user)}
 
 
 def ranked(totals: dict, names: dict) -> list[dict]:
@@ -41,11 +48,11 @@ def ranked(totals: dict, names: dict) -> list[dict]:
 
 
 @router.get("/summary/{year}/{month}")
-def monthly_summary(year: int, month: int, session: SessionDep):
+def monthly_summary(year: int, month: int, session: SessionDep, user: CurrentUser):
     if not 1 <= month <= 12:
         raise HTTPException(status_code=400, detail="Month must be between 1 and 12")
     start, end = month_bounds(year, month)
-    in_month = (Transaction.date >= start, Transaction.date < end)
+    in_month = (Transaction.user_id == user.id, Transaction.date >= start, Transaction.date < end)
 
     # One GROUP BY query instead of one query per category.
     spent_rows = session.exec(
@@ -64,12 +71,14 @@ def monthly_summary(year: int, month: int, session: SessionDep):
 
     budgets = {
         b.category_id: b.amount
-        for b in session.exec(select(Budget).where(Budget.year == year, Budget.month == month)).all()
+        for b in session.exec(
+            select(Budget).where(Budget.user_id == user.id, Budget.year == year, Budget.month == month)
+        ).all()
     }
 
     # Budget vs actual for every expense category.
     lines = []
-    for category in session.exec(select(Category).order_by(Category.name)).all():
+    for category in user_categories(session, user):
         if category.kind != CategoryKind.expense:
             continue
         budgeted = money(budgets.get(category.id))
@@ -84,7 +93,7 @@ def monthly_summary(year: int, month: int, session: SessionDep):
             "remaining": money(budgeted - actual),
         })
 
-    names = category_names(session)
+    names = category_names(session, user)
     income = money(sum(income_by_category.values()))
     spending = money(sum(spent.values()))
     total_budgeted = money(sum(line["budgeted"] for line in lines))
@@ -106,9 +115,9 @@ def monthly_summary(year: int, month: int, session: SessionDep):
 
 
 @router.get("/summary/{year}")
-def yearly_summary(year: int, session: SessionDep):
+def yearly_summary(year: int, session: SessionDep, user: CurrentUser):
     start, end = year_bounds(year)
-    in_year = (Transaction.date >= start, Transaction.date < end)
+    in_year = (Transaction.user_id == user.id, Transaction.date >= start, Transaction.date < end)
     month_of = extract("month", Transaction.date)  # works on SQLite and Postgres
 
     income_rows = session.exec(
@@ -143,8 +152,8 @@ def yearly_summary(year: int, session: SessionDep):
         })
 
     # Habits: in how many budgeted months did each category go over?
-    names = category_names(session)
-    budgets = session.exec(select(Budget).where(Budget.year == year)).all()
+    names = category_names(session, user)
+    budgets = session.exec(select(Budget).where(Budget.user_id == user.id, Budget.year == year)).all()
     months_budgeted = defaultdict(int)
     months_over = defaultdict(int)
     for budget in budgets:

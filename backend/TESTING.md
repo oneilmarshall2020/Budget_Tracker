@@ -5,11 +5,11 @@
 From the `backend` folder, venv active:
 
 ```bash
-pip install pytest      # once
-pytest                  # run everything (about 10 seconds)
+pip install -r requirements.txt   # once (pytest is in there)
+python -m pytest                  # run everything (about 20 seconds)
 ```
 
-You'll see a dot per test and then `98 passed`. Other handy forms:
+You'll see a dot per test and then `163 passed`. Other handy forms:
 
 | Command | Runs |
 |---|---|
@@ -23,7 +23,8 @@ You'll see a dot per test and then `98 passed`. Other handy forms:
 ## Your data is safe
 
 Each test gets its own brand-new database in a temporary folder (see `tests/conftest.py`).
-Tests never touch your real `database.db`, and one test can't affect another.
+Tests never touch your real `database.db`, and one test can't affect another. Each one also
+starts logged in as a made-up user called `tester`.
 
 ## What's tested
 
@@ -36,7 +37,10 @@ Tests never touch your real `database.db`, and one test can't affect another.
 | `test_keywords.py` | keywords, the suggested set, learning on import and on edit |
 | `test_matching.py` | closest-date pairing, pending charges, your transfers, refunds |
 | `test_parser.py` | the NCB reader on text laid out like a real statement |
-| `test_migrations.py` | new databases, old databases, backups, models matching migrations |
+| `test_migrations.py` | new databases, old databases, your pre-login data going to `owner`, backups, models matching migrations |
+| `test_auth.py` | signing up, logging in and out, lockouts, sign-up codes, the cookie, every endpoint needing a login |
+| `test_isolation.py` | two people in one app: nobody can see, change or point at anyone else's data |
+| `test_deploy.py` | settings for the internet: Neon addresses, no caching of private answers, https-only cookies |
 
 `tests/fixtures/` holds a made-up NCB statement (plus a locked and a "misread" version).
 `make_mock_statement.py` rebuilds them (`pip install reportlab` first).
@@ -70,7 +74,9 @@ def test_a_budget_needs_a_positive_amount(client, api):
 ```
 
 Fixtures you can ask for (all in `conftest.py`):
-- `client`: the API, with a fresh database.
+- `client`: the API, with a fresh database, logged in as `tester`.
+- `stranger`: a second person on the same database, logged in as `stranger`.
+- `anonymous`: a browser that hasn't logged in.
 - `api`: shortcuts like `api.account()`, `api.category("Food")`, `api.log(...)`, `api.preview_pdf(...)`, `api.import_csv(...)`.
 - `september`: an account, Food and Salary, a budget, a logged lunch and an August snack.
 - `imported`: `september` plus the test statement imported.
@@ -82,12 +88,16 @@ That bug can never come back without a red test telling you.
 
 - **Built in, nothing to install:** with the backend running, open http://127.0.0.1:8000/docs.
   Every endpoint is listed. Click one, **Try it out**, fill it in, **Execute**.
+  Log in first: run `POST /auth/login` with your username and password. The page keeps the
+  login cookie, so every other endpoint works after that.
 - **Bruno** (https://www.usebruno.com, free) saves your requests as files you can commit:
   1. Install it and choose **Create Collection**. Name it "Budget API" and save it in a new
      `Budget_Tracker/bruno` folder.
   2. **Environments → Create**, call it "local", and add a variable `baseUrl` = `http://127.0.0.1:8000`.
      Pick "local" in the top-right.
-  3. **New Request**: `GET {{baseUrl}}/account/`, then Send.
+  3. **New Request**: `POST {{baseUrl}}/auth/login` with the JSON body
+     `{"username": "you", "password": "..."}`, then Send. Bruno keeps the cookie for the requests after it.
+     Then `GET {{baseUrl}}/account/`, Send.
   4. For a JSON body, e.g. `POST {{baseUrl}}/categories/`: open **Body → JSON** and enter
      `{"name": "Food", "kind": "expense"}`.
   5. For a statement preview: `POST {{baseUrl}}/statement/preview`, **Body → Multipart Form**,

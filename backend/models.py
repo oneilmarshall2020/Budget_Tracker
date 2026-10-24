@@ -2,6 +2,7 @@ import datetime
 from enum import Enum
 
 from pydantic import field_validator
+from sqlalchemy import UniqueConstraint
 from sqlmodel import Field, SQLModel
 
 
@@ -24,6 +25,31 @@ def clean_keyword(value: str | None) -> str | None:
     if len(cleaned) < 2:
         raise ValueError("Keyword must be at least 2 characters")
     return cleaned
+
+
+USERNAME_CHARACTERS = set("abcdefghijklmnopqrstuvwxyz0123456789._-")
+
+
+def clean_username(value: str) -> str:
+    """Usernames are stored lowercase, so "Oj" and "oj" are the same person."""
+    cleaned = value.strip().lower()
+    if not 2 <= len(cleaned) <= 30:
+        raise ValueError("Username must be 2 to 30 characters")
+    if not set(cleaned) <= USERNAME_CHARACTERS:
+        raise ValueError("Username can only use letters, numbers, dots, dashes and underscores")
+    return cleaned
+
+
+def check_password(value: str) -> str:
+    if len(value) < 8:
+        raise ValueError("Password must be at least 8 characters")
+    if len(value) > 128:
+        raise ValueError("Password must be at most 128 characters")
+    return value
+
+
+def utc_now() -> datetime.datetime:
+    return datetime.datetime.now(datetime.timezone.utc)
 
 
 def clean_last_four(value: str | None) -> str | None:
@@ -59,9 +85,60 @@ class AccountType(str, Enum):
     credit_card = "credit_card"
 
 
+# ---------------------------------------------------------------- users and logins
+class User(SQLModel, table=True):
+    # "user" is a reserved word in Postgres, so the table gets a safer name.
+    __tablename__ = "users"
+
+    id: int | None = Field(default=None, primary_key=True)
+    username: str = Field(unique=True)
+    # Never the password itself: a one-way scramble of it (see auth.py).
+    # Empty = nobody can log in as this user until a password is set with users.py.
+    password_hash: str
+    created_at: datetime.datetime = Field(default_factory=utc_now)
+    # Too many wrong passwords in a row locks the account for a while.
+    failed_logins: int = 0
+    locked_until: datetime.datetime | None = None
+
+
+class LoginSession(SQLModel, table=True):
+    """One logged-in browser. The browser keeps a random token in a cookie; we keep
+    only a scramble (hash) of it, so a copy of the database can't be used to log in."""
+
+    __tablename__ = "login_session"
+
+    id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="users.id", index=True)
+    token_hash: str = Field(unique=True)
+    created_at: datetime.datetime = Field(default_factory=utc_now)
+    expires_at: datetime.datetime
+
+
+class SignUp(SQLModel):
+    username: str
+    password: str
+    signup_code: str | None = None
+
+    @field_validator("username")
+    @classmethod
+    def check_username(cls, value):
+        return clean_username(value)
+
+    @field_validator("password")
+    @classmethod
+    def check_password_rules(cls, value):
+        return check_password(value)
+
+
+class LogIn(SQLModel):
+    username: str
+    password: str
+
+
 # ---------------------------------------------------------------- accounts
 class Account(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="users.id", index=True)  # whose account this is
     nickname: str
     bank_name: str
     account_type: AccountType
@@ -118,6 +195,7 @@ class AccountUpdate(SQLModel):
 # ---------------------------------------------------------------- categories
 class Category(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="users.id", index=True)
     name: str
     kind: CategoryKind = CategoryKind.expense
 
@@ -147,9 +225,12 @@ class CategoryRule(SQLModel, table=True):
     """keyword -> category. Descriptions containing the keyword get that category."""
 
     __tablename__ = "category_rule"
+    # Each person can use a keyword once (two people can both have "JUICI").
+    __table_args__ = (UniqueConstraint("user_id", "keyword", name="uq_category_rule_user_keyword"),)
 
     id: int | None = Field(default=None, primary_key=True)
-    keyword: str = Field(unique=True)  # one category per keyword
+    user_id: int = Field(foreign_key="users.id", index=True)
+    keyword: str
     category_id: int = Field(foreign_key="category.id")
 
 
@@ -189,6 +270,7 @@ class RuleUpdate(SQLModel):
 # ---------------------------------------------------------------- budgets
 class Budget(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="users.id", index=True)
     category_id: int = Field(foreign_key="category.id")
     year: int
     month: int
@@ -216,12 +298,11 @@ class StatementImport(SQLModel, table=True):
     __tablename__ = "statement_import"
 
     id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="users.id", index=True)
     account_id: int | None = Field(default=None, foreign_key="account.id")
     file_name: str
     # Stored in UTC (the universal clock); the browser shows it in your local time.
-    imported_at: datetime.datetime = Field(
-        default_factory=lambda: datetime.datetime.now(datetime.timezone.utc)
-    )
+    imported_at: datetime.datetime = Field(default_factory=utc_now)
     first_date: datetime.date
     last_date: datetime.date
     row_count: int
@@ -233,6 +314,7 @@ class Transaction(SQLModel, table=True):
     __tablename__ = "transactions"
 
     id: int | None = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="users.id", index=True)
     amount: float  # always positive; `type` says which way the money moved
     date: datetime.date
     description: str

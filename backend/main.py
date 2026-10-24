@@ -1,10 +1,9 @@
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, Request
 
 from migrate import run_migrations
-from routers import account, budget, categories, rules, statements, summaries, transaction
+from routers import account, auth, budget, categories, rules, statements, summaries, transaction
 
 
 @asynccontextmanager
@@ -15,14 +14,20 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
+@app.middleware("http")
+async def never_cache(request: Request, call_next):
+    """Every answer holds someone's private data, so no browser or CDN may keep a copy."""
+    response = await call_next(request)
+    response.headers.setdefault("Cache-Control", "no-store")
+    return response
+
+
+# No CORS settings needed: the page always calls the backend through its own address
+# (/api/...), and Vite (locally) or the host (once deployed) passes those calls on to us.
+# To the browser it's all one site, which is also what lets the login cookie work.
+
+app.include_router(auth.router)
 app.include_router(account.router)
 app.include_router(categories.router)
 app.include_router(rules.router)

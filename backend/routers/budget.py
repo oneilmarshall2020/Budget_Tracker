@@ -1,16 +1,16 @@
 from fastapi import APIRouter, HTTPException
 from sqlmodel import select
 
+from auth import CurrentUser
 from database import SessionDep
+from helpers import get_owned_or_404
 from models import Budget, BudgetCreate, BudgetUpdate, Category, CategoryKind
 
 router = APIRouter(tags=["Budgets"])
 
 
-def check_budget_category(session, category_id: int) -> None:
-    category = session.get(Category, category_id)
-    if not category:
-        raise HTTPException(status_code=404, detail="Category not found")
+def check_budget_category(session, category_id: int, user) -> None:
+    category = get_owned_or_404(session, Category, category_id, user, "Category")
     if category.kind != CategoryKind.expense:
         raise HTTPException(status_code=400, detail="Budgets are only for expense categories")
 
@@ -32,10 +32,10 @@ def check_one_per_month(session, category_id: int, year: int, month: int, ignore
 
 
 @router.post("/budget/")
-def create_budget(budget_in: BudgetCreate, session: SessionDep) -> Budget:
-    check_budget_category(session, budget_in.category_id)
+def create_budget(budget_in: BudgetCreate, session: SessionDep, user: CurrentUser) -> Budget:
+    check_budget_category(session, budget_in.category_id, user)
     check_one_per_month(session, budget_in.category_id, budget_in.year, budget_in.month)
-    budget = Budget(**budget_in.model_dump())
+    budget = Budget(**budget_in.model_dump(), user_id=user.id)
     session.add(budget)
     session.commit()
     session.refresh(budget)
@@ -44,9 +44,9 @@ def create_budget(budget_in: BudgetCreate, session: SessionDep) -> Budget:
 
 @router.get("/budget/")
 def read_budgets(
-    session: SessionDep, year: int | None = None, month: int | None = None
+    session: SessionDep, user: CurrentUser, year: int | None = None, month: int | None = None
 ) -> list[Budget]:
-    statement = select(Budget)
+    statement = select(Budget).where(Budget.user_id == user.id)
     if year is not None:
         statement = statement.where(Budget.year == year)
     if month is not None:
@@ -55,16 +55,16 @@ def read_budgets(
 
 
 @router.patch("/budget/{budget_id}")
-def update_budget(budget_id: int, budget_update: BudgetUpdate, session: SessionDep) -> Budget:
-    budget = session.get(Budget, budget_id)
-    if not budget:
-        raise HTTPException(status_code=404, detail="Budget not found")
+def update_budget(
+    budget_id: int, budget_update: BudgetUpdate, session: SessionDep, user: CurrentUser
+) -> Budget:
+    budget = get_owned_or_404(session, Budget, budget_id, user, "Budget")
 
     update_data = budget_update.model_dump(exclude_unset=True, exclude_none=True)
     category_id = update_data.get("category_id", budget.category_id)
     year = update_data.get("year", budget.year)
     month = update_data.get("month", budget.month)
-    check_budget_category(session, category_id)
+    check_budget_category(session, category_id, user)
     check_one_per_month(session, category_id, year, month, ignore_id=budget.id)
 
     budget.sqlmodel_update(update_data)
@@ -75,10 +75,8 @@ def update_budget(budget_id: int, budget_update: BudgetUpdate, session: SessionD
 
 
 @router.delete("/budget/{budget_id}")
-def delete_budget(budget_id: int, session: SessionDep):
-    budget = session.get(Budget, budget_id)
-    if not budget:
-        raise HTTPException(status_code=404, detail="Budget not found")
+def delete_budget(budget_id: int, session: SessionDep, user: CurrentUser):
+    budget = get_owned_or_404(session, Budget, budget_id, user, "Budget")
     session.delete(budget)
     session.commit()
     return {"ok": True}

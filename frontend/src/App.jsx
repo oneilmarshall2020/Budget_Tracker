@@ -5,6 +5,7 @@ import {
   ChevronRight,
   CircleCheck,
   FileText,
+  LogOut,
   Monitor,
   Moon,
   Pencil,
@@ -17,7 +18,9 @@ import {
   X,
 } from "lucide-react";
 
-const BASE_URL = "http://127.0.0.1:8000";
+// The backend lives behind /api on this same site (see vite.config.js), so the login
+// cookie travels with every request automatically.
+const BASE_URL = "/api";
 
 // ================================================================ styles
 // Reused class strings, pulled out so the markup below stays readable.
@@ -187,6 +190,10 @@ function readError(data, status) {
   return `Request failed (${status})`;
 }
 
+// Called when the backend says "please log in" (status 401): your login ran out, or you
+// logged out in another tab. App sets it to "go back to the login screen".
+let onLoggedOut = () => {};
+
 // One place that does fetch + JSON + error handling, so every handler stays short.
 // async/await is the same as .then() chains, just read top to bottom.
 async function api(path, { method = "GET", body, form } = {}) {
@@ -205,7 +212,17 @@ async function api(path, { method = "GET", body, form } = {}) {
     throw new Error("Can't reach the server. Is the backend running?");
   }
   const data = await response.json().catch(() => null);
-  if (!response.ok) throw new Error(readError(data, response.status));
+  if (response.status === 401 && !path.startsWith("/auth/")) onLoggedOut();
+  if (!response.ok) {
+    // No JSON at all from a 5xx means Vite couldn't reach FastAPI (it isn't running).
+    const message =
+      data === null && response.status >= 500
+        ? "Can't reach the server. Is the backend running?"
+        : readError(data, response.status);
+    const error = new Error(message);
+    error.status = response.status; // lets the login screen tell "logged out" from "broken"
+    throw error;
+  }
   return data;
 }
 
@@ -511,12 +528,217 @@ function FlagBadge({ flag }) {
   );
 }
 
+const THEMES = [
+  ["system", Monitor, "System"],
+  ["light", Sun, "Light"],
+  ["dark", Moon, "Dark"],
+];
+
+function ThemeSwitch({ theme, onChange }) {
+  return (
+    <div
+      className="flex items-center gap-0.5 rounded-xl border border-slate-200 bg-white p-1 shadow-sm"
+      role="group"
+      aria-label="Theme"
+    >
+      {THEMES.map(([value, Icon, text]) => (
+        <button
+          key={value}
+          type="button"
+          title={`${text} theme`}
+          aria-label={`${text} theme`}
+          aria-pressed={theme === value}
+          onClick={() => onChange(value)}
+          className={`rounded-md p-1 transition-colors sm:p-1.5 ${
+            theme === value ? "bg-slate-100 text-slate-900" : "text-slate-400 hover:text-slate-700"
+          }`}
+        >
+          <Icon className="h-4 w-4" />
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function Logo() {
+  return (
+    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-slate-900 text-lg font-semibold text-white">
+      $
+    </div>
+  );
+}
+
+// ================================================================ logging in
+const EMPTY_LOGIN = { username: "", password: "", repeat: "", code: "" };
+
+function AuthScreen({ theme, onThemeChange, onLoggedIn, notice }) {
+  const [mode, setMode] = useState("login"); // "login" | "signup"
+  // Start with the last username used in this browser, so you only type your password.
+  const [form, setForm] = useState(() => ({
+    ...EMPTY_LOGIN,
+    username: readSaved("localStorage", "budget.lastUser") || "",
+  }));
+  const [needsCode, setNeedsCode] = useState(false);
+  const [error, setError] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  // Does creating an account need a sign-up code here? (Only once deployed, usually.)
+  useEffect(() => {
+    api("/auth/settings")
+      .then((settings) => setNeedsCode(settings.signup_needs_code))
+      .catch(() => {});
+  }, []);
+
+  function switchTo(next) {
+    setMode(next);
+    setError(null);
+    setForm({ ...EMPTY_LOGIN, username: form.username });
+  }
+
+  async function handleSubmit(event) {
+    event.preventDefault(); // stop the browser from reloading the page
+    setError(null);
+    if (mode === "signup" && form.password !== form.repeat) {
+      setError("The two passwords don't match.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const user =
+        mode === "login"
+          ? await api("/auth/login", {
+              method: "POST",
+              body: { username: form.username, password: form.password },
+            })
+          : await api("/auth/signup", {
+              method: "POST",
+              body: { username: form.username, password: form.password, signup_code: form.code || null },
+            });
+      onLoggedIn(user);
+    } catch (err) {
+      setError(err.message);
+      setBusy(false);
+    }
+  }
+
+  const signingUp = mode === "signup";
+  return (
+    <div className="min-h-screen bg-slate-50 text-slate-900">
+      <div className="mx-auto flex max-w-md flex-col px-4 py-8 sm:py-16">
+        <div className="mb-8 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <Logo />
+            <h1 className="text-2xl font-semibold tracking-tight">Ledger</h1>
+          </div>
+          <ThemeSwitch theme={theme} onChange={onThemeChange} />
+        </div>
+
+        <div className={card}>
+          <div className="mb-5 grid grid-cols-2 gap-1 rounded-xl bg-slate-100 p-1" role="tablist">
+            {[
+              ["login", "Log in"],
+              ["signup", "Create account"],
+            ].map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                role="tab"
+                aria-selected={mode === value}
+                onClick={() => switchTo(value)}
+                className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
+                  mode === value ? "bg-white text-slate-900 shadow-sm" : "text-slate-500 hover:text-slate-800"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+
+          {notice && !error && (
+            <p className="mb-4 rounded-lg bg-slate-100 px-3 py-2 text-sm text-slate-600">{notice}</p>
+          )}
+
+          <form className="space-y-4" onSubmit={handleSubmit}>
+            <Field label="Username">
+              <input
+                className={input}
+                value={form.username}
+                onChange={(event) => setForm({ ...form, username: event.target.value })}
+                autoComplete="username"
+                autoCapitalize="none"
+                spellCheck={false}
+                autoFocus={!form.username}
+                required
+              />
+            </Field>
+            <Field label={signingUp ? "Password (at least 8 characters)" : "Password"}>
+              <input
+                className={input}
+                type="password"
+                value={form.password}
+                onChange={(event) => setForm({ ...form, password: event.target.value })}
+                autoComplete={signingUp ? "new-password" : "current-password"}
+                autoFocus={Boolean(form.username) && !signingUp}
+                minLength={signingUp ? 8 : undefined}
+                required
+              />
+            </Field>
+            {signingUp && (
+              <Field label="Password again">
+                <input
+                  className={input}
+                  type="password"
+                  value={form.repeat}
+                  onChange={(event) => setForm({ ...form, repeat: event.target.value })}
+                  autoComplete="new-password"
+                  required
+                />
+              </Field>
+            )}
+            {signingUp && needsCode && (
+              <Field label="Sign-up code">
+                <input
+                  className={input}
+                  value={form.code}
+                  onChange={(event) => setForm({ ...form, code: event.target.value })}
+                  autoComplete="off"
+                  required
+                />
+                <span className="mt-1 block text-xs text-slate-500">
+                  Ask the person who runs this app for the code.
+                </span>
+              </Field>
+            )}
+
+            {error && (
+              <p
+                role="alert"
+                className="flex items-start gap-2 rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-700 dark:bg-rose-950/40 dark:text-rose-300"
+              >
+                <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+                {error}
+              </p>
+            )}
+
+            <button type="submit" className={`${primaryBtn} w-full`} disabled={busy}>
+              {busy ? "One moment..." : signingUp ? "Create account" : "Log in"}
+            </button>
+          </form>
+        </div>
+
+        <p className="mt-4 text-center text-xs text-slate-400">
+          Each account only ever sees its own money.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 // ================================================================ the app
-function App() {
+function BudgetApp({ user, theme, onThemeChange, onLogOut }) {
   // --- Which month you're looking at ---
   const [year, setYear] = useState(() => savedPeriod().year);
   const [month, setMonth] = useState(() => savedPeriod().month);
-  const [theme, setTheme] = useState(() => readSaved("localStorage", "budget.theme") || "system");
 
   // --- Data from the backend ---
   const [accounts, setAccounts] = useState([]);
@@ -650,20 +872,6 @@ function App() {
   useEffect(() => {
     save("sessionStorage", "budget.period", JSON.stringify({ year, month }));
   }, [year, month]);
-
-  // Dark mode: put the "dark" class on <html> when chosen, or when "System" and
-  // your computer is in dark mode (and follow it if that changes while open).
-  useEffect(() => {
-    const media = window.matchMedia("(prefers-color-scheme: dark)");
-    const apply = () => {
-      const dark = theme === "dark" || (theme === "system" && media.matches);
-      document.documentElement.classList.toggle("dark", dark);
-    };
-    apply();
-    save("localStorage", "budget.theme", theme);
-    media.addEventListener("change", apply);
-    return () => media.removeEventListener("change", apply);
-  }, [theme]);
 
   function reload() {
     setVersion((v) => v + 1);
@@ -1172,12 +1380,20 @@ function App() {
         {/* ---------------- HEADER + MONTH PICKER ---------------- */}
         <header className="mb-8 flex flex-wrap items-center gap-3">
           <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-slate-900 text-lg font-semibold text-white">
-              $
-            </div>
+            <Logo />
             <div>
-              <h1 className="text-2xl font-semibold tracking-tight">My Budget</h1>
-              <p className="text-sm text-slate-500">Income, spending and budgets, month by month</p>
+              <h1 className="text-2xl font-semibold tracking-tight">Ledger</h1>
+              <p className="text-sm text-slate-500">
+                Signed in as <span className="font-medium text-slate-700">{user.username}</span>
+                <span aria-hidden="true"> · </span>
+                <button
+                  type="button"
+                  onClick={onLogOut}
+                  className="inline-flex items-center gap-1 font-medium text-slate-700 underline-offset-2 hover:underline"
+                >
+                  <LogOut className="h-3.5 w-3.5" /> Log out
+                </button>
+              </p>
             </div>
           </div>
 
@@ -1216,31 +1432,7 @@ function App() {
             </button>
           </div>
 
-          <div
-            className="flex items-center gap-0.5 rounded-xl border border-slate-200 bg-white p-1 shadow-sm"
-            role="group"
-            aria-label="Theme"
-          >
-            {[
-              ["system", Monitor, "System"],
-              ["light", Sun, "Light"],
-              ["dark", Moon, "Dark"],
-            ].map(([value, Icon, text]) => (
-              <button
-                key={value}
-                type="button"
-                title={`${text} theme`}
-                aria-label={`${text} theme`}
-                aria-pressed={theme === value}
-                onClick={() => setTheme(value)}
-                className={`rounded-md p-1 transition-colors sm:p-1.5 ${
-                  theme === value ? "bg-slate-100 text-slate-900" : "text-slate-400 hover:text-slate-700"
-                }`}
-              >
-                <Icon className="h-4 w-4" />
-              </button>
-            ))}
-          </div>
+          <ThemeSwitch theme={theme} onChange={onThemeChange} />
           </div>
         </header>
 
@@ -2582,6 +2774,110 @@ function App() {
       )}
     </div>
   );
+}
+
+// ================================================================ the top: logged in or not?
+function App() {
+  // undefined = still asking the backend, null = logged out, {id, username} = logged in
+  const [user, setUser] = useState(undefined);
+  const [loginNotice, setLoginNotice] = useState(null);
+  const [startError, setStartError] = useState(null);
+  const [attempt, setAttempt] = useState(0); // bump to ask again after "can't reach the server"
+  const [theme, setTheme] = useState(() => readSaved("localStorage", "budget.theme") || "system");
+
+  // Dark mode: put the "dark" class on <html> when chosen, or when "System" and
+  // your computer is in dark mode (and follow it if that changes while open).
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const apply = () => {
+      const dark = theme === "dark" || (theme === "system" && media.matches);
+      document.documentElement.classList.toggle("dark", dark);
+    };
+    apply();
+    save("localStorage", "budget.theme", theme);
+    media.addEventListener("change", apply);
+    return () => media.removeEventListener("change", apply);
+  }, [theme]);
+
+  function loggedIn(me) {
+    save("localStorage", "budget.lastUser", me.username);
+    setLoginNotice(null);
+    setUser(me);
+  }
+
+  // Who am I? The browser sends the login cookie by itself; a 401 means "not logged in".
+  useEffect(() => {
+    let ignore = false;
+    api("/auth/me")
+      .then((me) => !ignore && loggedIn(me))
+      .catch((err) => {
+        if (ignore) return;
+        if (err.status === 401) setUser(null);
+        else setStartError(err.message);
+      });
+    return () => {
+      ignore = true;
+    };
+  }, [attempt]);
+
+  // Any request that comes back 401 later (login expired, logged out in another tab)
+  // brings you back here to log in again.
+  useEffect(() => {
+    onLoggedOut = () => {
+      setLoginNotice("You've been logged out. Log in again to carry on.");
+      setUser(null);
+    };
+    return () => {
+      onLoggedOut = () => {};
+    };
+  }, []);
+
+  async function logOut() {
+    try {
+      await api("/auth/logout", { method: "POST" });
+    } catch {
+      // Logging out should always work on screen, even if the server can't be reached.
+    }
+    setLoginNotice(null);
+    setUser(null);
+  }
+
+  if (user === undefined) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-slate-50 px-4 text-slate-500">
+        {startError ? (
+          <div className="text-center">
+            <p className="mb-3">{startError}</p>
+            <button
+              className={secondaryBtn}
+              onClick={() => {
+                setStartError(null);
+                setAttempt((a) => a + 1);
+              }}
+            >
+              Try again
+            </button>
+          </div>
+        ) : (
+          "Loading..."
+        )}
+      </div>
+    );
+  }
+
+  if (user === null) {
+    return (
+      <AuthScreen
+        theme={theme}
+        onThemeChange={setTheme}
+        notice={loginNotice}
+        onLoggedIn={loggedIn}
+      />
+    );
+  }
+
+  // key: a different person logging in gets a completely fresh app, nothing left over.
+  return <BudgetApp key={user.id} user={user} theme={theme} onThemeChange={setTheme} onLogOut={logOut} />;
 }
 
 export default App;

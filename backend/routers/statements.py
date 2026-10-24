@@ -5,9 +5,10 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from sqlalchemy import func, or_
 from sqlmodel import select
 
+from auth import CurrentUser
 from categorize import learnable, match_rule, suggest_keyword
 from database import SessionDep
-from helpers import category_fits, get_account_or_404, resolve_category
+from helpers import category_fits, get_account_or_404, get_owned_or_404, resolve_category
 from matching import (
     Draft,
     looks_like_transfer,
@@ -40,6 +41,7 @@ REFUND_LOOKBACK_DAYS = 60  # a refund undoes a purchase from at most 60 days bef
 @router.post("/statement/preview")
 def preview_statement(
     session: SessionDep,
+    user: CurrentUser,
     account_id: Annotated[int, Form()],
     file: Annotated[UploadFile, File()],
     password: Annotated[str | None, Form()] = None,
@@ -54,7 +56,7 @@ def preview_statement(
       5. transfer between your own accounts   -> "transfer"
       6. refunds get the category of the purchase they undo
     """
-    account = get_account_or_404(session, account_id)
+    account = get_account_or_404(session, account_id, user)
     try:
         parsed, problems = parse_statement(
             file.file.read(), file.filename or "", account.bank_name, password, account.last_four
@@ -63,24 +65,25 @@ def preview_statement(
         raise HTTPException(status_code=400, detail=str(exc))
 
     # Fee rows get filed under "Bank Fees", so make sure that category exists.
-    categories = session.exec(select(Category)).all()
+    mine = Transaction.user_id == user.id  # every query below only looks at your rows
+    categories = session.exec(select(Category).where(Category.user_id == user.id)).all()
     by_name = {c.name.lower(): c for c in categories}
     if BANK_FEES.lower() not in by_name and any(
         classify(r.description, r.amount)[1] == BANK_FEES for r in parsed
     ):
-        fees = Category(name=BANK_FEES, kind=CategoryKind.expense)
+        fees = Category(name=BANK_FEES, kind=CategoryKind.expense, user_id=user.id)
         session.add(fees)
         session.commit()
         session.refresh(fees)
         by_name[fees.name.lower()] = fees
     by_id = {c.id: c for c in by_name.values()}
 
-    rules = session.exec(select(CategoryRule)).all()
+    rules = session.exec(select(CategoryRule).where(CategoryRule.user_id == user.id)).all()
 
     # Learn from history: merchant -> category of its most recent categorized transaction.
     learned = {}
     for t in session.exec(
-        select(Transaction).where(Transaction.category_id.is_not(None)).order_by(Transaction.date)
+        select(Transaction).where(mine, Transaction.category_id.is_not(None)).order_by(Transaction.date)
     ).all():
         learned[merchant_key(t.description)] = t.category_id
 
@@ -129,6 +132,7 @@ def preview_statement(
     # What already exists around these dates on this account (or with no account).
     nearby = session.exec(
         select(Transaction).where(
+            mine,
             Transaction.date >= low - timedelta(days=MATCH_WINDOW_DAYS),
             Transaction.date <= high + timedelta(days=MATCH_WINDOW_DAYS),
             or_(Transaction.account_id == account_id, Transaction.account_id.is_(None)),
@@ -138,7 +142,10 @@ def preview_statement(
     logged = [t for t in nearby if t.source == TransactionSource.manual]
 
     # ---------------------------------------------------------------- pass 2: exact duplicates
-    batch_names = {b.id: b.file_name for b in session.exec(select(StatementImport)).all()}
+    batch_names = {
+        b.id: b.file_name
+        for b in session.exec(select(StatementImport).where(StatementImport.user_id == user.id)).all()
+    }
     used = set()
     for draft in drafts:
         duplicate = next(
@@ -189,10 +196,15 @@ def preview_statement(
             draft.note = f"You already logged '{t.description}' on {short_date(t.date)}"
 
     # ---------------------------------------------------------------- pass 5: own transfers
-    other_accounts = {a.id: a for a in session.exec(select(Account)).all() if a.id != account_id}
+    other_accounts = {
+        a.id: a
+        for a in session.exec(select(Account).where(Account.user_id == user.id)).all()
+        if a.id != account_id
+    }
     open_drafts = [d for d in drafts if not d.settled]
     other_side = session.exec(
         select(Transaction).where(
+            mine,
             Transaction.date >= low - timedelta(days=TRANSFER_WINDOW_DAYS),
             Transaction.date <= high + timedelta(days=TRANSFER_WINDOW_DAYS),
             Transaction.account_id.is_not(None),
@@ -235,6 +247,7 @@ def preview_statement(
     # ---------------------------------------------------------------- pass 6: refunds
     history = session.exec(
         select(Transaction).where(
+            mine,
             Transaction.type == TransactionType.expense,
             Transaction.date >= low - timedelta(days=REFUND_LOOKBACK_DAYS),
             Transaction.date <= high,
@@ -302,14 +315,14 @@ def preview_statement(
     }
 
 
-def link_and_pair(session, payload: ImportConfirm) -> tuple[int, int]:
+def link_and_pair(session, payload: ImportConfirm, user) -> tuple[int, int]:
     """Two follow-ups from the review, done even if no new rows are saved:
     link your hand-logged entries to this account, and mark the other side of
     transfers between your accounts as transfers. Returns (linked, transfers_paired)."""
     linked = 0
     for transaction_id in payload.matched_ids:
         logged = session.get(Transaction, transaction_id)
-        if logged and logged.source == TransactionSource.manual and logged.account_id is None:
+        if logged and logged.user_id == user.id and logged.source == TransactionSource.manual and logged.account_id is None:
             logged.account_id = payload.account_id
             session.add(logged)
             linked += 1
@@ -317,7 +330,7 @@ def link_and_pair(session, payload: ImportConfirm) -> tuple[int, int]:
     transfers_paired = 0
     for transaction_id in payload.transfer_pair_ids:
         other = session.get(Transaction, transaction_id)
-        if other and other.account_id not in (None, payload.account_id):
+        if other and other.user_id == user.id and other.account_id not in (None, payload.account_id):
             if other.type != TransactionType.transfer or other.category_id is not None:
                 other.type, other.category_id = TransactionType.transfer, None
                 session.add(other)
@@ -326,11 +339,11 @@ def link_and_pair(session, payload: ImportConfirm) -> tuple[int, int]:
 
 
 @router.post("/statement/confirm")
-def confirm_import(payload: ImportConfirm, session: SessionDep):
+def confirm_import(payload: ImportConfirm, session: SessionDep, user: CurrentUser):
     """Save the rows you kept in the preview."""
-    get_account_or_404(session, payload.account_id)
+    get_account_or_404(session, payload.account_id, user)
     if not payload.rows:
-        linked, transfers_paired = link_and_pair(session, payload)
+        linked, transfers_paired = link_and_pair(session, payload, user)
         session.commit()
         return {"created": [], "skipped": 0, "import_id": None, "keywords_learned": [],
                 "linked": linked, "transfers_paired": transfers_paired}
@@ -350,6 +363,7 @@ def confirm_import(payload: ImportConfirm, session: SessionDep):
 
     # The batch: every row saved below points to it, so the whole import can be undone.
     batch = StatementImport(
+        user_id=user.id,
         account_id=payload.account_id,
         file_name=payload.file_name.strip() or "statement",
         first_date=low,
@@ -360,12 +374,12 @@ def confirm_import(payload: ImportConfirm, session: SessionDep):
     session.flush()  # gives the batch its id now, before the transactions need it
 
     # Rules so far; new ones get added as we learn, so later rows see them.
-    rules = list(session.exec(select(CategoryRule)).all())
+    rules = list(session.exec(select(CategoryRule).where(CategoryRule.user_id == user.id)).all())
     learned_keywords = []
 
     created, skipped = [], 0
     for row in payload.rows:
-        category_id = resolve_category(session, row.category_id, row.type)
+        category_id = resolve_category(session, row.category_id, row.type, user)
         duplicate = next(
             (
                 t for t in existing
@@ -382,6 +396,7 @@ def confirm_import(payload: ImportConfirm, session: SessionDep):
             continue
 
         transaction = Transaction(
+            user_id=user.id,
             amount=round(row.amount, 2),
             date=row.date,
             description=row.description,
@@ -399,12 +414,12 @@ def confirm_import(payload: ImportConfirm, session: SessionDep):
             if match_rule(row.description, rules) is None:
                 keyword = suggest_keyword(row.description)
                 if keyword and all(r.keyword != keyword for r in rules):
-                    rule = CategoryRule(keyword=keyword, category_id=category_id)
+                    rule = CategoryRule(keyword=keyword, category_id=category_id, user_id=user.id)
                     session.add(rule)
                     rules.append(rule)
                     learned_keywords.append(keyword)
 
-    linked, transfers_paired = link_and_pair(session, payload)
+    linked, transfers_paired = link_and_pair(session, payload, user)
 
     if not created:
         session.delete(batch)  # everything was already there: nothing to undo later
@@ -427,30 +442,30 @@ def confirm_import(payload: ImportConfirm, session: SessionDep):
 
 
 @router.get("/statement/imports")
-def list_imports(session: SessionDep):
+def list_imports(session: SessionDep, user: CurrentUser):
     """Your statement imports, newest first, with how many of their rows still exist."""
     remaining = dict(
         session.exec(
             select(Transaction.import_id, func.count(Transaction.id))
-            .where(Transaction.import_id.is_not(None))
+            .where(Transaction.user_id == user.id, Transaction.import_id.is_not(None))
             .group_by(Transaction.import_id)
         ).all()
     )
     batches = session.exec(
-        select(StatementImport).order_by(StatementImport.imported_at.desc(), StatementImport.id.desc())
+        select(StatementImport)
+        .where(StatementImport.user_id == user.id)
+        .order_by(StatementImport.imported_at.desc(), StatementImport.id.desc())
     ).all()
     return [{**batch.model_dump(), "remaining": remaining.get(batch.id, 0)} for batch in batches]
 
 
 @router.delete("/statement/imports/{import_id}")
-def undo_import(import_id: int, session: SessionDep):
+def undo_import(import_id: int, session: SessionDep, user: CurrentUser):
     """Remove every transaction an import created, then the import itself.
 
     Transactions you typed in yourself are never touched: they have no import_id.
     """
-    batch = session.get(StatementImport, import_id)
-    if not batch:
-        raise HTTPException(status_code=404, detail="Import not found")
+    batch = get_owned_or_404(session, StatementImport, import_id, user, "Import")
 
     rows = session.exec(select(Transaction).where(Transaction.import_id == import_id)).all()
     for transaction in rows:

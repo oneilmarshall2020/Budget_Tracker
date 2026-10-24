@@ -14,26 +14,79 @@ import os
 os.environ["DATABASE_URL"] = "sqlite://"
 os.environ["ECHO_SQL"] = "0"
 
+import shutil  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
+import auth  # noqa: E402
 import database  # noqa: E402
 from main import app  # noqa: E402
+from migrate import run_migrations  # noqa: E402
+from pwdlib import PasswordHash  # noqa: E402
+from pwdlib.hashers.argon2 import Argon2Hasher  # noqa: E402
+
+# Real password scrambling is slow on purpose (that's what makes guessing hard).
+# Tests make hundreds of logins, so they use a much lighter setting.
+auth.password_hasher = PasswordHash((Argon2Hasher(time_cost=1, memory_cost=1024, parallelism=1),))
 
 FIXTURES = Path(__file__).parent / "fixtures"
 ROW_FIELDS = ("date", "description", "amount", "type", "category_id")
 
 
+PASSWORD = "correct horse battery"
+
+
+def sign_up(test_client, username, password=PASSWORD, **extra):
+    r = test_client.post("/auth/signup", json={"username": username, "password": password, **extra})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+@pytest.fixture(scope="session")
+def empty_database(tmp_path_factory):
+    """Build the tables once (running every migration takes a moment), then each test
+    starts from its own copy of this empty, up-to-date database."""
+    path = tmp_path_factory.mktemp("template") / "empty.db"
+    engine = database.make_engine(f"sqlite:///{path}")
+    real_engine, database.engine = database.engine, engine
+    try:
+        run_migrations()
+    finally:
+        database.engine = real_engine
+        engine.dispose()
+    return path
+
+
 @pytest.fixture
-def client(tmp_path, monkeypatch):
-    """A test version of the API, backed by a fresh database file in a temp folder."""
+def client(tmp_path, monkeypatch, empty_database):
+    """A test version of the API, backed by a fresh database file in a temp folder,
+    with a user called "tester" already logged in (the test client keeps the cookie)."""
+    shutil.copy(empty_database, tmp_path / "test.db")
     engine = database.make_engine(f"sqlite:///{tmp_path / 'test.db'}")
     monkeypatch.setattr(database, "engine", engine)  # swapped back after the test
+    monkeypatch.delenv("SIGNUP_CODE", raising=False)  # your own settings don't leak in
+    monkeypatch.delenv("SECURE_COOKIES", raising=False)
     with TestClient(app) as test_client:  # starting the app runs the migrations
+        sign_up(test_client, "tester")
         yield test_client
     engine.dispose()
+
+
+@pytest.fixture
+def stranger(client):
+    """Someone else using the same app and database, logged in as "stranger"."""
+    with TestClient(app) as other:
+        sign_up(other, "stranger")
+        yield other
+
+
+@pytest.fixture
+def anonymous(client):
+    """A browser that hasn't logged in."""
+    with TestClient(app) as nobody:
+        yield nobody
 
 
 class Api:

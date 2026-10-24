@@ -1,0 +1,10 @@
+# Everything the backend needs. Install or update with (venv active):
+#     pip install -r requirements.txt
+# These exact versions are the ones the tests pass with.
+fastapi[standard]==0.143.1
+sqlmodel==0.0.48
+alembic==1.20.0
+pdfplumber==0.11.10
+pwdlib[argon2]==0.3.1
+psycopg[binary]==3.3.6
+pytest==9.1.1

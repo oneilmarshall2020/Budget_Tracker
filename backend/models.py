@@ -99,6 +99,8 @@ class User(SQLModel, table=True):
     # Too many wrong passwords in a row locks the account for a while.
     failed_logins: int = 0
     locked_until: datetime.datetime | None = None
+    # A throwaway demo account full of made-up data (see demo.py), deleted after a week.
+    is_demo: bool = False
 
 
 class LoginSession(SQLModel, table=True):

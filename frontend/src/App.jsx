@@ -4,8 +4,11 @@ import {
   ChevronLeft,
   ChevronRight,
   CircleCheck,
+  Download,
   FileText,
+  FlaskConical,
   LogOut,
+  MessageSquareText,
   Monitor,
   Moon,
   Pencil,
@@ -578,16 +581,38 @@ function AuthScreen({ theme, onThemeChange, onLoggedIn, notice }) {
     ...EMPTY_LOGIN,
     username: readSaved("localStorage", "budget.lastUser") || "",
   }));
-  const [needsCode, setNeedsCode] = useState(false);
+  const [settings, setSettings] = useState({ signup_needs_code: false, demo: "off", demo_days: 7 });
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [demoError, setDemoError] = useState(null);
+  const [demoBusy, setDemoBusy] = useState(false);
 
-  // Does creating an account need a sign-up code here? (Only once deployed, usually.)
+  // Does creating an account need a sign-up code here? Is the demo switched on?
   useEffect(() => {
     api("/auth/settings")
-      .then((settings) => setNeedsCode(settings.signup_needs_code))
+      .then(setSettings)
       .catch(() => {});
   }, []);
+  const needsCode = settings.signup_needs_code;
+
+  // A demo link looks like https://<your site>/?demo=<the code>. With the code in the
+  // address, "Try the demo" is the main thing on the page. Without it, the demo only
+  // shows where it's open to anyone (on your laptop).
+  const demoCode = new URLSearchParams(window.location.search).get("demo");
+  const fromDemoLink = demoCode !== null;
+  const showDemo = settings.demo === "open" || (settings.demo === "code" && fromDemoLink);
+
+  async function startDemo() {
+    setDemoError(null);
+    setDemoBusy(true);
+    try {
+      const user = await api("/demo/start", { method: "POST", body: { code: demoCode } });
+      onLoggedIn(user);
+    } catch (err) {
+      setDemoError(err.message);
+      setDemoBusy(false);
+    }
+  }
 
   function switchTo(next) {
     setMode(next);
@@ -622,6 +647,44 @@ function AuthScreen({ theme, onThemeChange, onLoggedIn, notice }) {
   }
 
   const signingUp = mode === "signup";
+
+  // The "Try the demo" card: above the login box when you came from a demo link, below it otherwise.
+  const demoCard = showDemo && (
+    <section className={`${card} ${fromDemoLink ? "mb-4" : "mt-4"}`} aria-labelledby="demo-heading">
+      <div className="flex items-start gap-3">
+        <span className="rounded-lg bg-sky-50 p-2 text-sky-700 dark:bg-sky-950/40 dark:text-sky-300">
+          <FlaskConical className="h-5 w-5" />
+        </span>
+        <div>
+          <h2 id="demo-heading" className="font-semibold text-slate-900">
+            {fromDemoLink ? "Try Ledger" : "Just looking?"}
+          </h2>
+          <p className="mt-1 text-sm text-slate-600">
+            Use a demo account full of made-up money. No sign-up needed, and it deletes itself after{" "}
+            {settings.demo_days} days, or as soon as you end it.
+          </p>
+        </div>
+      </div>
+      {demoError && (
+        <p
+          role="alert"
+          className="mt-4 flex items-start gap-2 rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-700 dark:bg-rose-950/40 dark:text-rose-300"
+        >
+          <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+          {demoError}
+        </p>
+      )}
+      <button
+        type="button"
+        className={`${fromDemoLink ? primaryBtn : secondaryBtn} mt-4 w-full`}
+        onClick={startDemo}
+        disabled={demoBusy}
+      >
+        {demoBusy ? "Setting up your demo..." : "Try the demo"}
+      </button>
+    </section>
+  );
+
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900">
       <div className="mx-auto flex max-w-md flex-col px-4 py-8 sm:py-16">
@@ -632,6 +695,8 @@ function AuthScreen({ theme, onThemeChange, onLoggedIn, notice }) {
           </div>
           <ThemeSwitch theme={theme} onChange={onThemeChange} />
         </div>
+
+        {fromDemoLink && demoCard}
 
         <div className={card}>
           <div className="mb-5 grid grid-cols-2 gap-1 rounded-xl bg-slate-100 p-1" role="tablist">
@@ -726,11 +791,54 @@ function AuthScreen({ theme, onThemeChange, onLoggedIn, notice }) {
           </form>
         </div>
 
+        {!fromDemoLink && demoCard}
+
         <p className="mt-4 text-center text-xs text-slate-400">
           Each account only ever sees its own money.
         </p>
       </div>
     </div>
+  );
+}
+
+// ================================================================ demo banner
+// Across the top of a demo account: what it is, a made-up statement to try the import
+// with, and where to send feedback (the FEEDBACK_URL setting on the backend).
+function DemoBanner() {
+  const [settings, setSettings] = useState({ demo_days: 7, feedback_url: null });
+  useEffect(() => {
+    api("/auth/settings")
+      .then(setSettings)
+      .catch(() => {});
+  }, []);
+
+  const bannerBtn =
+    "inline-flex items-center gap-1.5 rounded-lg border border-sky-300 bg-white px-3 py-1.5 text-sm font-medium text-sky-800 transition-colors hover:bg-sky-100 dark:border-sky-800 dark:text-sky-200 dark:hover:bg-sky-900/40";
+
+  return (
+    <section
+      aria-label="Demo account"
+      className="mb-6 rounded-2xl border border-sky-200 bg-sky-50 p-4 text-sm text-sky-900 sm:flex sm:items-center sm:gap-4 dark:border-sky-900 dark:bg-sky-950/40 dark:text-sky-100"
+    >
+      <div className="flex items-start gap-3 sm:flex-1">
+        <FlaskConical className="mt-0.5 h-5 w-5 shrink-0" />
+        <p>
+          <span className="font-semibold">This is a demo.</span> All the money here is made up, and it's
+          deleted after {settings.demo_days} days, or when you end it. To see an import at work, download
+          the sample statement and bring it in with <span className="font-medium">Import a statement</span>.
+        </p>
+      </div>
+      <div className="mt-3 flex flex-wrap gap-2 pl-8 sm:mt-0 sm:shrink-0 sm:pl-0">
+        <a href={`${BASE_URL}/demo/sample-statement.pdf`} download className={bannerBtn}>
+          <Download className="h-4 w-4" /> Sample statement
+        </a>
+        {settings.feedback_url && (
+          <a href={settings.feedback_url} target="_blank" rel="noopener noreferrer" className={bannerBtn}>
+            <MessageSquareText className="h-4 w-4" /> Give feedback
+          </a>
+        )}
+      </div>
+    </section>
   );
 }
 
@@ -1384,14 +1492,29 @@ function BudgetApp({ user, theme, onThemeChange, onLogOut }) {
             <div>
               <h1 className="text-2xl font-semibold tracking-tight">Ledger</h1>
               <p className="text-sm text-slate-500">
-                Signed in as <span className="font-medium text-slate-700">{user.username}</span>
+                {user.is_demo ? (
+                  "Demo account"
+                ) : (
+                  <>
+                    Signed in as <span className="font-medium text-slate-700">{user.username}</span>
+                  </>
+                )}
                 <span aria-hidden="true"> · </span>
                 <button
                   type="button"
-                  onClick={onLogOut}
+                  onClick={
+                    user.is_demo
+                      ? () =>
+                          askConfirm(
+                            "Ending the demo deletes it and everything you added, straight away. You can start a fresh one any time.",
+                            onLogOut,
+                            { actionLabel: "End demo", title: "End the demo?" },
+                          )
+                      : onLogOut
+                  }
                   className="inline-flex items-center gap-1 font-medium text-slate-700 underline-offset-2 hover:underline"
                 >
-                  <LogOut className="h-3.5 w-3.5" /> Log out
+                  <LogOut className="h-3.5 w-3.5" /> {user.is_demo ? "End demo" : "Log out"}
                 </button>
               </p>
             </div>
@@ -1435,6 +1558,8 @@ function BudgetApp({ user, theme, onThemeChange, onLogOut }) {
           <ThemeSwitch theme={theme} onChange={onThemeChange} />
           </div>
         </header>
+
+        {user.is_demo && <DemoBanner />}
 
         {loading && <p className="text-slate-500">Loading...</p>}
 
@@ -2800,7 +2925,8 @@ function App() {
   }, [theme]);
 
   function loggedIn(me) {
-    save("localStorage", "budget.lastUser", me.username);
+    // Remember your username for next time (not a demo's: it can't be logged into again).
+    if (!me.is_demo) save("localStorage", "budget.lastUser", me.username);
     setLoginNotice(null);
     setUser(me);
   }
@@ -2833,6 +2959,14 @@ function App() {
   }, []);
 
   async function logOut() {
+    if (user.is_demo) {
+      // Ending a demo deletes it on the server. If that fails, stay put and show the
+      // error, rather than pretend it's gone.
+      await api("/demo/end", { method: "POST" });
+      setLoginNotice("Demo ended and deleted. Thanks for trying Ledger!");
+      setUser(null);
+      return;
+    }
     try {
       await api("/auth/logout", { method: "POST" });
     } catch {

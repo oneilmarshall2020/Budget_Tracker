@@ -4,6 +4,7 @@
     python users.py claim                 make the data from before logins existed yours
     python users.py create                make a new account (no sign-up code needed)
     python users.py set-password NAME     choose a new password for NAME (forgot it?)
+    python users.py remove-old-demos      delete demo accounts older than a week now
 
 These work on whichever database the app uses: database.db, or the one DATABASE_URL
 points to (so the same commands work on your deployed database).
@@ -18,6 +19,7 @@ from sqlmodel import Session, func, select  # noqa: E402
 
 import database  # noqa: E402
 from auth import hash_password  # noqa: E402
+from demo import DEMO_DAYS, remove_old_demos  # noqa: E402
 from migrate import run_migrations  # noqa: E402
 from models import (  # noqa: E402
     Account,
@@ -128,9 +130,16 @@ def main(args: list[str]) -> int:
             users = session.exec(select(User).order_by(User.username)).all()
             if not users:
                 print("No accounts yet.")
-            for user in users:
+            real = [u for u in users if not u.is_demo]
+            for user in real:
                 note = "  (unclaimed: run  python users.py claim)" if user.password_hash == "" else ""
                 print(f"{user.username}: {counts(session, user)}{note}")
+            if len(real) < len(users):
+                print(f"plus {len(users) - len(real)} demo accounts (deleted after {DEMO_DAYS} days)")
+            return 0
+
+        if command == "remove-old-demos":
+            print(f"Removed {remove_old_demos(session)} old demo accounts.")
             return 0
 
         if command == "claim":

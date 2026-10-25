@@ -152,6 +152,14 @@ def delete_rule(rule_id: int, session: SessionDep, user: CurrentUser):
 def add_suggested(session: SessionDep, user: CurrentUser):
     """Add the suggested categories and their keywords. Safe to run twice: anything you
     already have (same name, same keyword) is left alone."""
+    categories_added, keywords_added = add_suggested_set(session, user)
+    session.commit()
+    return {"categories_added": categories_added, "keywords_added": keywords_added}
+
+
+def add_suggested_set(session, user) -> tuple[int, int]:
+    """The work behind /rules/suggested (demo accounts start with it too).
+    Returns (categories added, keywords added). The caller commits."""
     categories = {
         c.name.lower(): c
         for c in session.exec(select(Category).where(Category.user_id == user.id)).all()
@@ -173,5 +181,5 @@ def add_suggested(session: SessionDep, user: CurrentUser):
                 taken.add(keyword)
                 keywords_added += 1
 
-    session.commit()
-    return {"categories_added": categories_added, "keywords_added": keywords_added}
+    session.flush()
+    return categories_added, keywords_added

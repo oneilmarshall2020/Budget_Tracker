@@ -66,8 +66,8 @@ def client(tmp_path, monkeypatch, empty_database):
     shutil.copy(empty_database, tmp_path / "test.db")
     engine = database.make_engine(f"sqlite:///{tmp_path / 'test.db'}")
     monkeypatch.setattr(database, "engine", engine)  # swapped back after the test
-    monkeypatch.delenv("SIGNUP_CODE", raising=False)  # your own settings don't leak in
-    monkeypatch.delenv("SECURE_COOKIES", raising=False)
+    for setting in ("SIGNUP_CODE", "SECURE_COOKIES", "DEMO_CODE", "FEEDBACK_URL", "VERCEL"):
+        monkeypatch.delenv(setting, raising=False)  # your own settings don't leak in
     with TestClient(app) as test_client:  # starting the app runs the migrations
         sign_up(test_client, "tester")
         yield test_client

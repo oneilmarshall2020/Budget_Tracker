@@ -9,7 +9,7 @@ pip install -r requirements.txt   # once (pytest is in there)
 python -m pytest                  # run everything (about 20 seconds)
 ```
 
-You'll see a dot per test and then `163 passed`. Other handy forms:
+You'll see a dot per test and then `181 passed`. Other handy forms:
 
 | Command | Runs |
 |---|---|
@@ -41,9 +41,12 @@ starts logged in as a made-up user called `tester`.
 | `test_auth.py` | signing up, logging in and out, lockouts, sign-up codes, the cookie, every endpoint needing a login |
 | `test_isolation.py` | two people in one app: nobody can see, change or point at anyone else's data |
 | `test_deploy.py` | settings for the internet: Neon addresses, no caching of private answers, https-only cookies |
+| `test_demo.py` | demo accounts: when they're allowed, what's in them, the sample statement importing cleanly, deleting them |
 
-`tests/fixtures/` holds a made-up NCB statement (plus a locked and a "misread" version).
-`make_mock_statement.py` rebuilds them (`pip install reportlab` first).
+`tests/fixtures/` holds a test NCB statement (plus a locked and a "misread" version), with
+rows copied from a real statement and names taken out. `make_mock_statement.py` rebuilds them
+(`pip install reportlab` first). They're only for tests: the demo's sample statement,
+`samples/ncb_sample_statement.pdf`, is a separate, fully invented one (`samples/make_sample_statement.py`).
 
 ## Reading a failure
 

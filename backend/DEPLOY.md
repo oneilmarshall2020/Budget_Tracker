@@ -50,18 +50,21 @@ Your `database.db` isn't changed. From now on the deployed site holds your real 
 3. **Project Name**: something like `oj-budget-api`. Your backend's address becomes
    `https://oj-budget-api.vercel.app`, so pick a name you like.
 4. **Root Directory**: click **Edit**, choose `backend`. Vercel should detect FastAPI.
-5. **Environment Variables**, add two:
+5. **Environment Variables**, add these:
 
    | Key | Value |
    |---|---|
    | `DATABASE_URL` | the Neon address |
    | `SIGNUP_CODE` | a code you make up for friends, e.g. `mango-river-42` |
+   | `DEMO_CODE` | optional, switches demos on (part 7), e.g. `try-ledger-7` |
+   | `FEEDBACK_URL` | optional, where the demo's **Give feedback** button goes (part 7) |
 
 6. **Deploy**.
 
 Check, in your browser:
 - `https://<backend name>.vercel.app/` shows `{"message":"Hello from the budget API"}`
-- `https://<backend name>.vercel.app/auth/settings` shows `{"signup_needs_code":true}`
+- `https://<backend name>.vercel.app/auth/settings` shows `"signup_needs_code":true`
+  (and `"demo":"code"` if you set `DEMO_CODE`, `"demo":"off"` if you didn't)
 
 ## 4. Point the site at the backend
 
@@ -93,12 +96,37 @@ your data is there.
 - [ ] In a private window, try to create an account **without** the code: refused.
       With the code: works, and the new account starts empty.
 
+## 7. Sharing the demo
+
+People can try Ledger in a demo account full of made-up money (see `ACCOUNTS.md`). They never
+type in anything real, so you never hold anyone's real money, and each demo deletes itself.
+
+1. Make a feedback form, e.g. a Google Form ("What did you try? What was confusing? What's
+   missing?"). Copy its link.
+2. Backend project → **Settings → Environment Variables**: add `DEMO_CODE` (anything, e.g.
+   `try-ledger-7`) and `FEEDBACK_URL` (the form's link). Then **Redeploy** the backend.
+3. Send people `https://<your site>/?demo=<your DEMO_CODE>`.
+
+Check, in a private window:
+- [ ] The link shows **Try Ledger** above the login box. The site without `?demo=...` doesn't.
+- [ ] **Try the demo** opens a full month of made-up spending with a blue demo banner.
+- [ ] **Sample statement** downloads, and importing it into NCB Chequing shows the review screen.
+- [ ] **End demo** asks first, then brings you back to the login page.
+
+To stop new demos: change `DEMO_CODE` (old links stop working) or delete it, then Redeploy.
+
 ## Everyday changes from now on
 
 1. Change code on your laptop, try it locally.
 2. `python -m pytest`
 3. `git commit` and `git push`. Both projects redeploy in about a minute. New migrations run
    by themselves when the backend starts.
+
+**Pushing a new migration?** (a new file in `migrations/versions/`) It changes the tables in
+Neon the moment the backend restarts, so take a snapshot first: Neon → your project →
+**Backup & restore** → **Create snapshot**. The free plan keeps one snapshot, so if it says
+you're at the limit, delete the old one first. (Don't see snapshots? Turn on **Enhanced view**
+on that page.)
 
 Changed an environment variable in Vercel? It only applies to new deployments: open the
 project's **Deployments**, then **⋯ → Redeploy** on the latest one.

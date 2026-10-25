@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 
 from migrate import run_migrations
-from routers import account, auth, budget, categories, rules, statements, summaries, transaction
+from routers import account, auth, budget, categories, demo, rules, statements, summaries, transaction
 
 
 @asynccontextmanager
@@ -28,6 +28,7 @@ async def never_cache(request: Request, call_next):
 # To the browser it's all one site, which is also what lets the login cookie work.
 
 app.include_router(auth.router)
+app.include_router(demo.router)
 app.include_router(account.router)
 app.include_router(categories.router)
 app.include_router(rules.router)

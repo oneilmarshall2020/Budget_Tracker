@@ -8,6 +8,7 @@ your database hasn't had yet, **after backing it up**. You never delete `databas
 |---|---|
 | `0001_baseline.py` | The six tables as they were before migrations existed |
 | `0002_users.py` | Logins: the `users` and `login_session` tables, and a `user_id` on every data table. Data that existed before goes to a user called `owner` (see `ACCOUNTS.md`) |
+| `0003_demo_accounts.py` | An `is_demo` column on `users`, so demo accounts can be found and cleaned up (see `ACCOUNTS.md`) |
 
 ## Every time you change `models.py`
 

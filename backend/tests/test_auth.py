@@ -26,7 +26,7 @@ def stored_user(username) -> User:
 def test_signing_up_logs_you_straight_in(anonymous):
     assert anonymous.get("/auth/me").status_code == 401
     me = sign_up(anonymous, "newcomer")
-    assert anonymous.get("/auth/me").json() == me == {"id": me["id"], "username": "newcomer"}
+    assert anonymous.get("/auth/me").json() == me == {"id": me["id"], "username": "newcomer", "is_demo": False}
 
 
 def test_usernames_ignore_capitals_and_are_unique(anonymous):
@@ -47,14 +47,14 @@ def test_bad_usernames_and_short_passwords_are_refused(anonymous, username, pass
 
 def test_the_password_is_never_stored_or_sent_back(anonymous):
     me = sign_up(anonymous, "secretive", password="my secret phrase")
-    assert set(me) == {"id", "username"}
+    assert set(me) == {"id", "username", "is_demo"}
     stored = stored_user("secretive").password_hash
     assert "my secret phrase" not in stored and stored.startswith("$argon2")
 
 
 def test_a_sign_up_code_keeps_strangers_out(anonymous, monkeypatch):
     monkeypatch.setenv("SIGNUP_CODE", "mango-season")
-    assert anonymous.get("/auth/settings").json() == {"signup_needs_code": True}
+    assert anonymous.get("/auth/settings").json()["signup_needs_code"] is True
     for code in (None, "wrong"):
         r = anonymous.post("/auth/signup", json={"username": "friend", "password": PASSWORD, "signup_code": code})
         assert r.status_code == 403
@@ -62,7 +62,7 @@ def test_a_sign_up_code_keeps_strangers_out(anonymous, monkeypatch):
 
 
 def test_no_code_needed_when_none_is_set(anonymous):
-    assert anonymous.get("/auth/settings").json() == {"signup_needs_code": False}
+    assert anonymous.get("/auth/settings").json()["signup_needs_code"] is False
 
 
 # ---------------------------------------------------------------- logging in and out
@@ -136,11 +136,15 @@ def test_the_cookie_is_https_only_once_deployed(anonymous, monkeypatch):
 
 
 # ---------------------------------------------------------------- every endpoint is protected
+# Open to everyone on purpose: the welcome message, starting a demo, the made-up statement.
+PUBLIC = {"/", "/demo/start", "/demo/sample-statement.pdf"}
+
+
 def data_endpoints():
     """Every endpoint except the login ones, with example values in place of {ids}."""
     examples = {"year": "2026", "month": "9"}
     for path, methods in app.openapi()["paths"].items():  # the same list /docs shows
-        if path.startswith("/auth") or path == "/":
+        if path.startswith("/auth") or path in PUBLIC:
             continue
         for method in methods:
             yield method.upper(), re.sub(r"\{(\w+)\}", lambda m: examples.get(m.group(1), "1"), path)
